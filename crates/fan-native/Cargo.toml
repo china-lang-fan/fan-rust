@@ -1,0 +1,18 @@
+[package]
+name = "fan-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "凡语言原生函数库"
+
+# 注意：本 crate 只依赖标准库。依赖第三方库的内建（正则/JSON/HTTP）位于
+# 独立的扩展动态库 crate 中，由 `@内建模块` 标签按需加载，见 `src/ext/`。
+[dependencies]
+fan-ast = { workspace = true }
+fan-object = { workspace = true }
+
+# 仅测试期依赖：让 `cargo test -p fan-native` 先产出扩展动态库，
+# 端到端用例才能 dlopen 到它。运行期解释器并不依赖扩展库。
+[dev-dependencies]
+fan-ext-regex = { workspace = true }

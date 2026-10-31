@@ -1,0 +1,16 @@
+[package]
+name = "fan-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "凡语言命令行工具"
+
+[dependencies]
+fan-ast = { workspace = true }
+fan-eval = { workspace = true }
+fan-lexer = { workspace = true }
+fan-object = { workspace = true }
+fan-parser = { workspace = true }
+fan-testrun = { workspace = true }
+fan-native = { workspace = true }

@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fan-ast",
+    "crates/fan-lexer",
+    "crates/fan-parser",
+    "crates/fan-object",
+    "crates/fan-eval",
+    "crates/fan-native",
+    "crates/fan-testrun",
+    "crates/fan-cli",
+    "crates/fan-ext-regex",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["凡语言项目组"]
+
+[workspace.dependencies]
+fan-ast = { path = "crates/fan-ast" }
+fan-lexer = { path = "crates/fan-lexer" }
+fan-parser = { path = "crates/fan-parser" }
+fan-object = { path = "crates/fan-object" }
+fan-eval = { path = "crates/fan-eval" }
+fan-native = { path = "crates/fan-native" }
+fan-ext-regex = { path = "crates/fan-ext-regex" }
+fan-testrun = { path = "crates/fan-testrun" }
+
+thiserror = "1"
+
+[profile.release]
+opt-level = 3

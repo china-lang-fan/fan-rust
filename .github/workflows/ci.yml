@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # 标准库位置：单测冒烟与 `fan 测试` 都读它
+  FAN_SDK: ${{ github.workspace }}/fan-sdk
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取出 fan-rust
+        uses: actions/checkout@v4
+
+      # 标准库由 Go 版与 Rust 版共用，单独成仓，不放在实现仓库内
+      - name: 取出标准库
+        uses: actions/checkout@v4
+        with:
+          repository: china-lang-fan/fan-sdk
+          path: fan-sdk
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 代码格式检查（cargo fmt）
+        run: cargo fmt --all -- --check
+
+      - name: 静态检查（clippy）
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # 单测与冒烟都要读标准库源码，位置由上方的 FAN_SDK 给出
+      - name: 单元测试（cargo test）
+        run: cargo test --workspace
+
+      - name: 标准库测试（fan 测试）
+        run: |
+          cargo build -p fan-cli
+          ./target/debug/fan-cli 测试 "$FAN_SDK"
