@@ -7,9 +7,28 @@ use std::path::{Path, PathBuf};
 
 use fan_parser::parse_program;
 
-/// 定位仓库根的 fan-sdk 目录。
+/// 定位 fan-sdk 目录。
+///
+/// 标准库由 Go 版与 Rust 版共用、不在任一实现仓库内，故不能写死相对路径：
+/// 先认 `FAN_SDK` 环境变量，再按工作区布局逐级向上找 `fan-sdk`。
+/// 与 `fan-eval` 的 sdk_smoke 保持一致，两处都要能同时适配
+/// 「标准库在实现仓库内」和「标准库与实现仓库同级」两种布局。
 fn sdk_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fan-sdk")
+    if let Ok(dir) = std::env::var("FAN_SDK") {
+        let dir = PathBuf::from(dir);
+        if dir.is_dir() {
+            return dir;
+        }
+    }
+    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for _ in 0..4 {
+        let candidate = dir.join("fan-sdk");
+        if candidate.is_dir() {
+            return candidate;
+        }
+        dir.pop();
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fan-sdk")
 }
 
 /// 收集目录下所有 `.凡` 文件，按名字排序。
