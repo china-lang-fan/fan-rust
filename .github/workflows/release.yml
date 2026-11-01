@@ -35,10 +35,14 @@ jobs:
       - name: 校验 tag 与 Cargo.toml 版本一致
         run: |
           set -euo pipefail
-          标记版本="${GITHUB_REF_NAME#v}"
-          清单版本=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          if [ "$标记版本" != "$清单版本" ]; then
-            echo "::error::tag 版本 $标记版本 与 Cargo.toml 版本 $清单版本 不一致"
+          # shell 变量只能用 ASCII：bash 不认中文变量名，
+          # 写「清单版本=...」会被当成命令执行而不是赋值
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version=$(awk -F'"' '/^version = "/ {print $2; exit}' Cargo.toml)
+          echo "tag 版本：$tag_version"
+          echo "Cargo.toml 版本：$cargo_version"
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "::error::tag 版本 $tag_version 与 Cargo.toml 版本 $cargo_version 不一致"
             echo "请先改 Cargo.toml 的 version 并提交，再打同版本的 tag"
             exit 1
           fi
@@ -109,15 +113,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          包名="fan-$FAN_VERSION-${{ matrix.target }}"
-          mkdir -p "$包名/sdk"
+          pkg="fan-$FAN_VERSION-${{ matrix.target }}"
+          mkdir -p "$pkg/sdk"
           if [ -f "target/${{ matrix.target }}/release/fan-cli.exe" ]; then
-            cp "target/${{ matrix.target }}/release/fan-cli.exe" "$包名/"
+            cp "target/${{ matrix.target }}/release/fan-cli.exe" "$pkg/"
           else
-            cp "target/${{ matrix.target }}/release/fan-cli" "$包名/"
+            cp "target/${{ matrix.target }}/release/fan-cli" "$pkg/"
           fi
-          cp fan-sdk/*.凡 "$包名/sdk/"
-          cp fan-sdk/README.md fan-sdk/LICENSE "$包名/sdk/"
+          cp fan-sdk/*.凡 "$pkg/sdk/"
+          cp fan-sdk/README.md fan-sdk/LICENSE "$pkg/sdk/"
 
       - name: 打包（tar.gz）
         if: runner.os != 'Windows'
