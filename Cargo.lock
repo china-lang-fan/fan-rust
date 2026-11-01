@@ -62,11 +62,11 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "fan-ast"
-version = "0.1.0"
+version = "0.6.0"
 
 [[package]]
 name = "fan-cli"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "fan-ast",
  "fan-eval",
@@ -79,7 +79,7 @@ dependencies = [
 
 [[package]]
 name = "fan-eval"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "fan-ast",
  "fan-lexer",
@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "fan-ext-http"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "fan-object",
  "ureq",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "fan-ext-json"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "fan-ast",
  "fan-object",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "fan-ext-regex"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "fan-object",
  "regex",
@@ -116,14 +116,14 @@ dependencies = [
 
 [[package]]
 name = "fan-lexer"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "fan-ast",
 ]
 
 [[package]]
 name = "fan-native"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "fan-ast",
  "fan-ext-http",
@@ -134,14 +134,14 @@ dependencies = [
 
 [[package]]
 name = "fan-object"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "fan-ast",
 ]
 
 [[package]]
 name = "fan-parser"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "fan-ast",
  "fan-lexer",
@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "fan-testrun"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "fan-ast",
  "fan-eval",
