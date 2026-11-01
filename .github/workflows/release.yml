@@ -142,6 +142,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: fan-${{ env.FAN_VERSION }}-${{ matrix.target }}.tar.gz
+          # 同一版本重跑时要能覆盖同名产物
+          overwrite: true
           generate_release_notes: true
 
       - name: 上传安装包
@@ -149,4 +151,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: fan-${{ env.FAN_VERSION }}-${{ matrix.target }}.zip
+          overwrite: true
           generate_release_notes: true
