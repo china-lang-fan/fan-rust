@@ -94,7 +94,10 @@ jobs:
           repository: china-lang-fan/fan-sdk
           path: fan-sdk
 
+      # 必须指定 bash：Windows 默认用 pwsh，它不认 ${VAR#v} 这类参数展开，
+      # 结果 FAN_VERSION 没被设上，而组装步骤开了 set -u，未定义变量即报错
       - name: 计算版本号
+        shell: bash
         run: echo "FAN_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
@@ -113,6 +116,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # 打印出来，万一再出错能一眼看出版本号有没有取到
+          echo "FAN_VERSION=[$FAN_VERSION]"
           pkg="fan-$FAN_VERSION-${{ matrix.target }}"
           mkdir -p "$pkg/sdk"
           if [ -f "target/${{ matrix.target }}/release/fan-cli.exe" ]; then
