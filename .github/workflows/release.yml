@@ -1,0 +1,140 @@
+name: release
+
+# 打 v 开头的 tag 触发：先跑一遍门禁，再为各平台产出安装包挂到 Release。
+# 安装包内容 = fan-cli 可执行文件 + 标准库（sdk/ 目录）。
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # 上传安装包到 Release
+
+env:
+  CARGO_TERM_COLOR: always
+  # 标准库位置：门禁里的标准库测试读它
+  FAN_SDK: ${{ github.workspace }}/fan-sdk
+
+jobs:
+  # 与 ci 相同的四道门禁，避免给跑不通的版本打 Release
+  门禁:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取出 fan-rust
+        uses: actions/checkout@v4
+
+      - name: 取出标准库
+        uses: actions/checkout@v4
+        with:
+          repository: china-lang-fan/fan-sdk
+          path: fan-sdk
+
+      # 版本号只认 Cargo.toml（fan-cli 版本 读的就是它），tag 必须与之相同，
+      # 以免出现「包叫 0.2.0、fan 版本 却报 0.1.0」
+      - name: 校验 tag 与 Cargo.toml 版本一致
+        run: |
+          set -euo pipefail
+          标记版本="${GITHUB_REF_NAME#v}"
+          清单版本=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "$标记版本" != "$清单版本" ]; then
+            echo "::error::tag 版本 $标记版本 与 Cargo.toml 版本 $清单版本 不一致"
+            echo "请先改 Cargo.toml 的 version 并提交，再打同版本的 tag"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 代码格式检查（cargo fmt）
+        run: cargo fmt --all -- --check
+
+      - name: 静态检查（clippy）
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 单元测试（cargo test）
+        run: cargo test --workspace
+
+      - name: 标准库测试（fan 测试）
+        run: |
+          cargo build -p fan-cli
+          ./target/debug/fan-cli 测试 "$FAN_SDK"
+
+  构建安装包:
+    needs: 门禁
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest # Apple Silicon
+            target: aarch64-apple-darwin
+          - os: macos-13 # Intel
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: 取出 fan-rust
+        uses: actions/checkout@v4
+
+      # 标准库随安装包分发，取默认分支的最新版本
+      - name: 取出标准库
+        uses: actions/checkout@v4
+        with:
+          repository: china-lang-fan/fan-sdk
+          path: fan-sdk
+
+      - name: 计算版本号
+        run: echo "FAN_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: 构建 release
+        run: cargo build --release --target ${{ matrix.target }} -p fan-cli
+
+      # 标准库只带 .凡 与说明文件，不带 .git
+      - name: 组装安装包
+        shell: bash
+        run: |
+          set -euo pipefail
+          包名="fan-$FAN_VERSION-${{ matrix.target }}"
+          mkdir -p "$包名/sdk"
+          if [ -f "target/${{ matrix.target }}/release/fan-cli.exe" ]; then
+            cp "target/${{ matrix.target }}/release/fan-cli.exe" "$包名/"
+          else
+            cp "target/${{ matrix.target }}/release/fan-cli" "$包名/"
+          fi
+          cp fan-sdk/*.凡 "$包名/sdk/"
+          cp fan-sdk/README.md fan-sdk/LICENSE "$包名/sdk/"
+
+      - name: 打包（tar.gz）
+        if: runner.os != 'Windows'
+        run: tar -czf "fan-$FAN_VERSION-${{ matrix.target }}.tar.gz" "fan-$FAN_VERSION-${{ matrix.target }}"
+
+      - name: 打包（zip）
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path "fan-$env:FAN_VERSION-${{ matrix.target }}" -DestinationPath "fan-$env:FAN_VERSION-${{ matrix.target }}.zip"
+
+      - name: 上传安装包
+        if: runner.os != 'Windows'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: fan-${{ env.FAN_VERSION }}-${{ matrix.target }}.tar.gz
+          generate_release_notes: true
+
+      - name: 上传安装包
+        if: runner.os == 'Windows'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: fan-${{ env.FAN_VERSION }}-${{ matrix.target }}.zip
+          generate_release_notes: true

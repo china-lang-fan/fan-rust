@@ -108,10 +108,48 @@ cargo build -p fan-cli && ./target/debug/fan-cli 测试 "$FAN_SDK"
 单测不要依赖外网或已构建出的扩展库：前者不稳定，后者会让结果取决于构建
 产物是否存在（可用 `ExtRegistry::without_library()` 显式关闭扩展库加载）。
 
-## 持续集成
+## 持续集成与发布
 
 `.github/workflows/ci.yml`：push 与 PR 触发，检出本仓库与标准库后依次跑
 上面四道门禁。
+
+`.github/workflows/release.yml`：打 `v` 开头的 tag 触发。先跑同一套门禁，
+通过后为各平台构建并打包，安装包挂到对应的 Release。
+
+### 发版
+
+版本号只认 `Cargo.toml` 的 `version`（`fan 版本` 读的就是它）。tag 必须与
+它一致，不一致会直接在门禁里报错，以免出现「包叫 0.2.0、`fan 版本` 却报
+0.1.0」：
+
+```bash
+# 1. 改 Cargo.toml 的 version 并提交
+# 2. 打同版本的 tag
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+### 安装包
+
+每个平台的安装包都是「可执行文件 + 标准库」：
+
+```
+fan-0.2.0-x86_64-unknown-linux-gnu/
+├── fan-cli        # 可执行（Windows 下为 fan-cli.exe）
+└── sdk/           # 标准库，导入时自动查找
+```
+
+解压即用，无需再设 `FAN_SDK`——标准库就在可执行文件旁边。
+
+| 平台 | 产物 |
+| --- | --- |
+| Linux x86_64 | `fan-<版本>-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `fan-<版本>-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `fan-<版本>-x86_64-apple-darwin.tar.gz` |
+| Windows x86_64 | `fan-<版本>-x86_64-pc-windows-msvc.zip` |
+
+macOS 的二进制未签名，首次运行若被 Gatekeeper 拦下，执行
+`xattr -d com.apple.quarantine fan-cli` 即可。
 
 ## 许可
 
