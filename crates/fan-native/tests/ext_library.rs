@@ -90,6 +90,128 @@ fn 扩展库与默认实现行为一致() {
 }
 
 #[test]
+fn 能定位到json扩展库文件() {
+    expose_library();
+    let path = resolve_library("json").expect("找不到 JSON 扩展库");
+    assert!(
+        path.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("libfan_ext_json"),
+        "实际：{}",
+        path.display()
+    );
+}
+
+#[test]
+fn json有扩展库时走扩展库() {
+    expose_library();
+    let mut rt = Runtime::new();
+    let mut reg = ExtRegistry::new();
+    assert_eq!(reg.ensure(&mut rt, "json").unwrap(), ExtSource::Library);
+    assert_eq!(reg.source_of("json"), Some(ExtSource::Library));
+    assert!(rt.lookup_native("jsonEncode").is_some());
+    assert!(rt.lookup_native("jsonDecode").is_some());
+}
+
+#[test]
+fn json扩展库与默认实现编码一致() {
+    // 扩展库会替换回落实现，两者必须给出逐字相同的文本，
+    // 否则部署扩展库就会静默改变程序输出
+    expose_library();
+    let mut rt = Runtime::new();
+    let mut reg = ExtRegistry::new();
+    reg.ensure(&mut rt, "json").unwrap();
+
+    let mut dict = fan_object::FanDict::new();
+    dict.set(Object::string("名"), Object::string("凡"));
+    dict.set(Object::string("版本"), Object::int(1));
+
+    let cases = vec![
+        Object::int(42),
+        Object::Float(1.0),
+        Object::Float(2.5),
+        Object::string("甲\"乙"),
+        Object::Bool(true),
+        Object::Nil,
+        Object::array(vec![Object::int(1), Object::string("二")]),
+        Object::Dict(dict),
+    ];
+    for value in cases {
+        let expected = fan_native::ext::default::json::encode(&value);
+        let builtin = rt.lookup_native("jsonEncode").unwrap();
+        let out = (builtin.func)(&mut rt, vec![value.clone()]).unwrap();
+        assert_eq!(
+            out[0].as_str().as_deref(),
+            expected.as_deref().ok(),
+            "值 {}",
+            value.inspect()
+        );
+    }
+}
+
+#[test]
+fn json扩展库与默认实现解码一致() {
+    expose_library();
+    let mut rt = Runtime::new();
+    let mut reg = ExtRegistry::new();
+    reg.ensure(&mut rt, "json").unwrap();
+
+    for text in [
+        r#"{"名":"凡","项":[1,2]}"#,
+        "[1,2.5,\"x\",true,null]",
+        "42",
+        "{bad",
+    ] {
+        let expected = fan_native::ext::default::json::decode(text);
+        let builtin = rt.lookup_native("jsonDecode").unwrap();
+        let out = (builtin.func)(&mut rt, vec![Object::string(text)]).unwrap();
+        match expected {
+            Ok(value) => assert_eq!(out[0], value, "文本 {}", text),
+            // 失败时错误文案不同，但都必须是「失败」
+            Err(_) => assert!(out[0] == Object::Nil, "文本 {} 本应解析失败", text),
+        }
+    }
+}
+
+#[test]
+fn 网络有扩展库时走扩展库() {
+    expose_library();
+    let mut rt = Runtime::new();
+    let mut reg = ExtRegistry::new();
+    assert_eq!(reg.ensure(&mut rt, "网络").unwrap(), ExtSource::Library);
+    assert_eq!(reg.source_of("网络"), Some(ExtSource::Library));
+    assert!(rt.lookup_native("httpRequest").is_some());
+}
+
+#[test]
+fn 网络扩展库与默认实现的失败路径一致() {
+    // 连不上的地址：两者都要给出 success 为假的字典 + 错误值，
+    // 凡语言层才能用同一套 `如果 !结果["success"]` 判断。
+    // 标准库 网络_测试.凡 走的正是这条路径
+    expose_library();
+    let mut rt = Runtime::new();
+    let mut reg = ExtRegistry::new();
+    reg.ensure(&mut rt, "网络").unwrap();
+
+    let builtin = rt.lookup_native("httpRequest").unwrap();
+    let out = (builtin.func)(
+        &mut rt,
+        vec![Object::string("GET"), Object::string("http://127.0.0.1:1/")],
+    )
+    .unwrap();
+    let result = match &out[0] {
+        Object::Dict(d) => d.clone(),
+        other => panic!("应返回结果字典，实际 {}", other.kind()),
+    };
+    assert_eq!(
+        result.get(&Object::string("success")),
+        Some(Object::Bool(false))
+    );
+    assert!(matches!(out[1], Object::Error(_)), "第二项应是错误值");
+}
+
+#[test]
 fn 按内建名也能触发库加载() {
     expose_library();
     let mut rt = Runtime::new();

@@ -124,6 +124,12 @@ impl std::fmt::Display for ExtSource {
 pub struct ExtRegistry {
     /// 模块名与实现来源，按登记顺序。
     loaded: Vec<(String, ExtSource)>,
+    /// 是否允许加载扩展动态库。
+    ///
+    /// 关掉后必定走默认实现。搜索目录是「环境变量 + 可执行文件所在目录 +
+    /// 当前目录」的并集，无法靠环境变量屏蔽已构建出的库，故回落路径只有
+    /// 通过此开关才能确定性地测试——否则测试结果取决于构建产物是否存在。
+    library_allowed: bool,
 }
 
 impl Default for ExtRegistry {
@@ -134,7 +140,20 @@ impl Default for ExtRegistry {
 
 impl ExtRegistry {
     pub fn new() -> Self {
-        ExtRegistry { loaded: Vec::new() }
+        ExtRegistry {
+            loaded: Vec::new(),
+            library_allowed: true,
+        }
+    }
+
+    /// 构造一个不加载扩展库的注册表，只走内置默认实现。
+    ///
+    /// 供测试与「不希望触碰第三方依赖」的嵌入场景使用。
+    pub fn without_library() -> Self {
+        ExtRegistry {
+            loaded: Vec::new(),
+            library_allowed: false,
+        }
     }
 
     /// 已登记的模块名列表。
@@ -164,9 +183,9 @@ impl ExtRegistry {
         if let Some(source) = self.source_of(module) {
             return Ok(source);
         }
-        let source = match load_into(rt, module) {
-            Ok(()) => ExtSource::Library,
-            Err(_) => {
+        let source = match self.library_allowed.then(|| load_into(rt, module)) {
+            Some(Ok(())) => ExtSource::Library,
+            _ => {
                 // 没有注册实现 → 使用默认
                 if !has_default(module) {
                     return Err(format!("模块 {} 既没有扩展库，也没有默认实现", module));
@@ -315,8 +334,9 @@ mod tests {
     #[test]
     fn 无扩展库时回落到默认实现() {
         let mut rt = Runtime::new();
-        let mut reg = ExtRegistry::new();
-        // json 有默认实现，故即使找不到动态库也应成功
+        let mut reg = ExtRegistry::without_library();
+        // json 有默认实现，故即使不加载动态库也应成功。
+        // 用 without_library 而非「碰巧没构建出库」来保证这一点
         let source = reg.ensure(&mut rt, "json").expect("应回落到默认实现");
         assert_eq!(source, ExtSource::Default);
         assert_eq!(reg.source_of("json"), Some(ExtSource::Default));
@@ -344,7 +364,7 @@ mod tests {
     #[test]
     fn 按内建名自动补加载() {
         let mut rt = Runtime::new();
-        let mut reg = ExtRegistry::new();
+        let mut reg = ExtRegistry::without_library();
         assert_eq!(
             reg.ensure_for_native(&mut rt, "jsonEncode").unwrap(),
             ExtSource::Default

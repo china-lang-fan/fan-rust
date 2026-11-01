@@ -10,6 +10,8 @@ members = [
     "crates/fan-testrun",
     "crates/fan-cli",
     "crates/fan-ext-regex",
+    "crates/fan-ext-json",
+    "crates/fan-ext-http",
 ]
 
 [workspace.package]
@@ -26,6 +28,8 @@ fan-object = { path = "crates/fan-object" }
 fan-eval = { path = "crates/fan-eval" }
 fan-native = { path = "crates/fan-native" }
 fan-ext-regex = { path = "crates/fan-ext-regex" }
+fan-ext-json = { path = "crates/fan-ext-json" }
+fan-ext-http = { path = "crates/fan-ext-http" }
 fan-testrun = { path = "crates/fan-testrun" }
 
 thiserror = "1"

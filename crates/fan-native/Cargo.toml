@@ -16,3 +16,5 @@ fan-object = { workspace = true }
 # 端到端用例才能 dlopen 到它。运行期解释器并不依赖扩展库。
 [dev-dependencies]
 fan-ext-regex = { workspace = true }
+fan-ext-json = { workspace = true }
+fan-ext-http = { workspace = true }

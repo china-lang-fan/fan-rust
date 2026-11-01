@@ -1,0 +1,16 @@
+[package]
+name = "fan-ext-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "凡语言网络扩展库：基于 ureq，以动态库形式按需加载，支持 HTTPS"
+
+[lib]
+name = "fan_ext_http"
+# cdylib：供解释器 dlopen；rlib：便于测试与复用
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fan-object = { path = "../fan-object" }
+ureq = "3"

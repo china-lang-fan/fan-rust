@@ -3,9 +3,10 @@
 //! 与 `ext_library.rs` 分属两个测试可执行文件，避免它们对
 //! `FAN_EXT_DIR` 环境变量的相反要求相互干扰。
 //!
-//! 注意：扩展库会被构建到 `target/debug/deps`，而那里正是测试可执行文件
-//! 所在目录，属于**预期的部署位置**，因此无法在本进程内把 `正则` 的库
-//! “藏起来”。回落路径改用确实没有库的模块（如 `json`）来验证。
+//! 注意：扩展库会被构建到测试可执行文件所在目录，属于**预期的部署位置**，
+//! 故 `hide_library` 只能清掉环境变量、并不能把已构建出的库“藏起来”。于是
+//! 「回落」不依赖某个模块恰好没有库（那样每新增一个扩展库就会失效），
+//! 而改用 `ExtRegistry::without_library()` 显式关闭扩展库加载。
 
 use fan_native::ext::default;
 use fan_native::ext::{resolve_library, ExtRegistry, ExtSource};
@@ -19,8 +20,7 @@ fn hide_library() {
 #[test]
 fn 未部署扩展库时定位不到() {
     hide_library();
-    // json 没有对应的扩展库 crate，故任何搜索目录里都不该有
-    assert!(resolve_library("json").is_none(), "不该找到 json 扩展库");
+    // 没有对应 crate 的模块，任何搜索目录里都不该有库文件
     assert!(
         resolve_library("绝不存在的模块").is_none(),
         "不该找到不存在的扩展库"
@@ -29,9 +29,9 @@ fn 未部署扩展库时定位不到() {
 
 #[test]
 fn 无扩展库时回落到默认实现() {
-    hide_library();
     let mut rt = Runtime::new();
-    let mut reg = ExtRegistry::new();
+    // 显式关闭扩展库，而非指望目标模块恰好没有库
+    let mut reg = ExtRegistry::without_library();
     let source = reg.ensure(&mut rt, "json").expect("应回落到默认实现");
     assert_eq!(source, ExtSource::Default);
     assert_eq!(reg.source_of("json"), Some(ExtSource::Default));
@@ -39,9 +39,8 @@ fn 无扩展库时回落到默认实现() {
 
 #[test]
 fn 默认实现注册的内建可用() {
-    hide_library();
     let mut rt = Runtime::new();
-    let mut reg = ExtRegistry::new();
+    let mut reg = ExtRegistry::without_library();
     reg.ensure(&mut rt, "json").unwrap();
 
     let builtin = rt.lookup_native("jsonEncode").expect("jsonEncode 未注册");
