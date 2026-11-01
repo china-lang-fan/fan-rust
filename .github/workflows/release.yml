@@ -16,8 +16,9 @@ env:
   FAN_SDK: ${{ github.workspace }}/fan-sdk
 
 jobs:
-  # 与 ci 相同的四道门禁，避免给跑不通的版本打 Release
-  门禁:
+  gate:
+    name: 门禁
+    # 与 ci 相同的四道门禁，避免给跑不通的版本打 Release
     runs-on: ubuntu-latest
     steps:
       - name: 取出 fan-rust
@@ -62,8 +63,9 @@ jobs:
           cargo build -p fan-cli
           ./target/debug/fan-cli 测试 "$FAN_SDK"
 
-  构建安装包:
-    needs: 门禁
+  build:
+    name: 构建安装包
+    needs: gate
     strategy:
       fail-fast: false
       matrix:
