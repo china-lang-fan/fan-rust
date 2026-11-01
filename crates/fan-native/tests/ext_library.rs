@@ -24,7 +24,7 @@ fn expose_library() {
 #[test]
 fn 能定位到扩展库文件() {
     expose_library();
-    let path = resolve_library("正则").expect("找不到正则扩展库");
+    let path = resolve_library("regex").expect("找不到正则扩展库");
     assert!(
         path.file_name()
             .unwrap()
@@ -40,9 +40,9 @@ fn 有扩展库时走扩展库() {
     expose_library();
     let mut rt = Runtime::new();
     let mut reg = ExtRegistry::new();
-    let source = reg.ensure(&mut rt, "正则").expect("应加载扩展库");
+    let source = reg.ensure(&mut rt, "regex").expect("应加载扩展库");
     assert_eq!(source, ExtSource::Library);
-    assert_eq!(reg.source_of("正则"), Some(ExtSource::Library));
+    assert_eq!(reg.source_of("regex"), Some(ExtSource::Library));
 }
 
 #[test]
@@ -50,7 +50,7 @@ fn 扩展库注册的内建可用() {
     expose_library();
     let mut rt = Runtime::new();
     let mut reg = ExtRegistry::new();
-    reg.ensure(&mut rt, "正则").unwrap();
+    reg.ensure(&mut rt, "regex").unwrap();
 
     let builtin = rt.lookup_native("regexMatch").expect("regexMatch 未注册");
     let out = (builtin.func)(
@@ -68,7 +68,7 @@ fn 扩展库与默认实现行为一致() {
     expose_library();
     let mut rt = Runtime::new();
     let mut reg = ExtRegistry::new();
-    reg.ensure(&mut rt, "正则").unwrap();
+    reg.ensure(&mut rt, "regex").unwrap();
 
     let cases: Vec<(&str, &str, &str)> = vec![
         (r"\d+", "a12b34", "12"),
@@ -179,8 +179,8 @@ fn 网络有扩展库时走扩展库() {
     expose_library();
     let mut rt = Runtime::new();
     let mut reg = ExtRegistry::new();
-    assert_eq!(reg.ensure(&mut rt, "网络").unwrap(), ExtSource::Library);
-    assert_eq!(reg.source_of("网络"), Some(ExtSource::Library));
+    assert_eq!(reg.ensure(&mut rt, "http").unwrap(), ExtSource::Library);
+    assert_eq!(reg.source_of("http"), Some(ExtSource::Library));
     assert!(rt.lookup_native("httpRequest").is_some());
 }
 
@@ -192,7 +192,7 @@ fn 网络扩展库与默认实现的失败路径一致() {
     expose_library();
     let mut rt = Runtime::new();
     let mut reg = ExtRegistry::new();
-    reg.ensure(&mut rt, "网络").unwrap();
+    reg.ensure(&mut rt, "http").unwrap();
 
     let builtin = rt.lookup_native("httpRequest").unwrap();
     let out = (builtin.func)(
@@ -209,16 +209,4 @@ fn 网络扩展库与默认实现的失败路径一致() {
         Some(Object::Bool(false))
     );
     assert!(matches!(out[1], Object::Error(_)), "第二项应是错误值");
-}
-
-#[test]
-fn 按内建名也能触发库加载() {
-    expose_library();
-    let mut rt = Runtime::new();
-    let mut reg = ExtRegistry::new();
-    assert_eq!(
-        reg.ensure_for_native(&mut rt, "regexQuote").unwrap(),
-        ExtSource::Library
-    );
-    assert!(rt.lookup_native("regexFindAllGroups").is_some());
 }

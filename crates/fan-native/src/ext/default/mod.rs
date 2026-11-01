@@ -54,16 +54,6 @@ fn register_all(rt: &mut Runtime, specs: Vec<NativeSpec>) {
     }
 }
 
-/// 内建名 → 所属模块。用于 `@内建` 找不到实现时自动补加载。
-pub fn module_of(native_name: &str) -> Option<&'static str> {
-    match native_name {
-        "jsonEncode" | "jsonDecode" => Some("json"),
-        name if name.starts_with("regex") => Some("正则"),
-        "httpRequest" => Some("网络"),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,20 +77,6 @@ mod tests {
     }
 
     #[test]
-    fn 按内建名自动补加载正则() {
-        let mut rt = Runtime::new();
-        let mut reg = crate::ext::ExtRegistry::new();
-        // 具体来源取决于运行环境是否部署了 fan_ext_regex：有则「扩展库」，
-        // 无则「默认实现」。这里只要求补加载成功且内建可用。
-        let source = reg.ensure_for_native(&mut rt, "regexMatch").unwrap();
-        assert!(matches!(
-            source,
-            crate::ext::ExtSource::Default | crate::ext::ExtSource::Library
-        ));
-        assert!(rt.lookup_native("regexFindAll").is_some());
-    }
-
-    #[test]
     fn 注册后内建可查到() {
         let mut rt = Runtime::new();
         register(&mut rt, "json").unwrap();
@@ -114,14 +90,5 @@ mod tests {
         assert!(register(&mut rt, "不存在")
             .unwrap_err()
             .contains("也没有默认实现"));
-    }
-
-    #[test]
-    fn 内建名可反查模块() {
-        assert_eq!(module_of("jsonEncode"), Some("json"));
-        assert_eq!(module_of("jsonDecode"), Some("json"));
-        assert_eq!(module_of("regexMatch"), Some("正则"));
-        assert_eq!(module_of("regexQuote"), Some("正则"));
-        assert_eq!(module_of("print"), None);
     }
 }

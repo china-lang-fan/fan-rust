@@ -85,7 +85,13 @@ impl TagRegistry {
     }
 }
 
-/// `@内建("名字")`：把函数绑定到 `core` 组的原生实现。
+/// `@内建("名字")`：把函数绑定到原生实现。
+///
+/// 名字统一用英文，可写成 `模块名.函数名`：
+///
+/// - 写了模块名：按模块名加载扩展库（找不到库则回落内置默认实现），
+///   再从中取指定的原生函数；
+/// - 不写模块名：只取系统已注册的（`core` 组）内建，不做模块反查。
 ///
 /// 绑定后调用该函数将转调原生实现，函数体不再执行。
 struct BuiltinTag;
@@ -100,7 +106,7 @@ impl TagHandler for BuiltinTag {
         let pos = ctx.tag.pos;
         // 名字可写成 `模块名.函数名`：模块名用于加载对应的扩展库（找不到
         // 扩展库时回落到内置默认实现），函数名指定其中的原生函数。
-        // 不写模块名时，取系统已注册的默认函数。
+        // 不写模块名时，只取系统已注册的（core 组）内建。
         let (module, native_name) = match spec.split_once('.') {
             Some((m, f)) if !m.is_empty() && !f.is_empty() => (Some(m.to_string()), f.to_string()),
             _ => (None, spec.clone()),
@@ -115,37 +121,26 @@ impl TagHandler for BuiltinTag {
             loaded.map_err(|e| FanError::at(e, pos))?;
         }
 
-        let found = rt.borrow().lookup_native(&native_name);
-        let builtin = match found {
+        let builtin = match rt.borrow().lookup_native(&native_name) {
             Some(b) => b,
-            // 未写模块名：按函数名反查所属模块并加载，兼容只写函数名的写法
-            None if module.is_none() => {
-                let source = {
-                    let mut rt_mut = rt.borrow_mut();
-                    ctx.interp
-                        .ext
-                        .borrow_mut()
-                        .ensure_for_native(&mut rt_mut, &native_name)
-                };
-                if source.is_err() {
-                    return Err(FanError::at(
-                        format!("标签 @{} 引用的原生函数 {} 未注册", 内建标签, native_name),
-                        pos,
-                    ));
-                }
-                rt.borrow().lookup_native(&native_name).ok_or_else(|| {
-                    FanError::at(
-                        format!("标签 @{} 引用的原生函数 {} 未注册", 内建标签, native_name),
-                        pos,
-                    )
-                })?
-            }
-            None => {
+            // 写了模块名却仍找不到：该模块里没有这个函数
+            None if module.is_some() => {
                 return Err(FanError::at(
                     format!(
                         "模块 {} 中没有原生函数 {}",
                         module.unwrap_or_default(),
                         native_name
+                    ),
+                    pos,
+                ))
+            }
+            // 未写模块名又不在已注册的内建里：提示可以补上模块名
+            None => {
+                return Err(FanError::at(
+                    format!(
+                        "标签 @{} 引用的原生函数 {} 未注册；\
+                         若它属于扩展模块，请写成「模块名.函数名」",
+                        内建标签, native_name
                     ),
                     pos,
                 ))
@@ -395,12 +390,22 @@ mod tests {
     }
 
     #[test]
-    fn 内建标签不写模块名时取默认实现() {
-        // 不写模块名：沿用按函数名反查所属模块的兼容路径
+    fn 内建标签不写模块名时只取已注册内建() {
+        // 不写模块名：只用系统已注册的（core 组）内建，不再按函数名反查模块
         check(
-            "@内建(\"jsonEncode\")\n函数 生成(值)\n    返回 空\n结束\n生成([1, 2])",
-            "([1,2], 空)",
+            "@内建(\"double\")\n函数 加倍(数)\n    返回 空\n结束\n加倍(4)",
+            "8",
         );
+    }
+
+    #[test]
+    fn 内建标签不写模块名时扩展内建报错并提示() {
+        // 扩展模块的内建必须写模块名，否则报错并提示正确写法
+        let (program, _) =
+            parse_program("@内建(\"jsonEncode\")\n函数 生成(值)\n    返回 0\n结束\n");
+        let mut interp = interp_with_native();
+        let err = interp.run(&program).unwrap_err().display();
+        assert!(err.contains("模块名.函数名"), "实际：{}", err);
     }
 
     #[test]

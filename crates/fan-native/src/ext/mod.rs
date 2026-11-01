@@ -197,18 +197,6 @@ impl ExtRegistry {
         self.loaded.push((module.to_string(), source));
         Ok(source)
     }
-
-    /// 按内建名确保其所属模块已登记，供 `@内建` 找不到实现时自动补加载。
-    pub fn ensure_for_native(
-        &mut self,
-        rt: &mut Runtime,
-        native: &str,
-    ) -> Result<ExtSource, String> {
-        match default::module_of(native) {
-            Some(module) => self.ensure(rt, module),
-            None => Err(String::new()),
-        }
-    }
 }
 
 /// 动态库搜索目录：环境变量优先，其次可执行文件所在目录与当前目录。
@@ -359,19 +347,6 @@ mod tests {
         let err = reg.ensure(&mut rt, "不存在的模块").unwrap_err();
         assert!(err.contains("既没有扩展库"), "实际：{}", err);
         assert!(!reg.is_loaded("不存在的模块"));
-    }
-
-    #[test]
-    fn 按内建名自动补加载() {
-        let mut rt = Runtime::new();
-        let mut reg = ExtRegistry::without_library();
-        assert_eq!(
-            reg.ensure_for_native(&mut rt, "jsonEncode").unwrap(),
-            ExtSource::Default
-        );
-        assert!(rt.lookup_native("jsonDecode").is_some());
-        // 不属于任何扩展模块的内建返回空错误，交由调用方继续处理
-        assert_eq!(reg.ensure_for_native(&mut rt, "print").unwrap_err(), "");
     }
 
     #[test]
