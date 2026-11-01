@@ -7,7 +7,7 @@
 use crate::error::{value, EvalResult, FanError, Flow};
 use crate::eval::Interpreter;
 use fan_ast::{
-    ClassStmt, DeclType, InterfaceStmt, MethodDef, Position, TypeCastExpr, TypeTestExpr,
+    ClassStmt, DeclType, InterfaceStmt, MethodDef, Position, TypeCastExpr, TypeTestExpr, Visibility,
 };
 use fan_object::{
     primitive_kind_from_name, runtime_type_name, Class, Environment, FanArray, FanDict, Function,
@@ -215,6 +215,40 @@ impl Interpreter {
 
     // ------------------------------------------------------------ 成员访问
 
+    /// 取字段声明的可见性；未声明的字段按默认（文件级）处理。
+    fn field_visibility(class: &Class, name: &str) -> Visibility {
+        class
+            .fields
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.visibility)
+            .unwrap_or_default()
+    }
+
+    /// 校验 `私有` 成员：只允许在所属模型自己的方法体内访问。
+    fn check_private(
+        &self,
+        owner: &Rc<Class>,
+        name: &str,
+        vis: Visibility,
+        what: &str,
+        pos: Position,
+    ) -> Result<(), FanError> {
+        if vis != Visibility::Private {
+            return Ok(());
+        }
+        if self.inside_class(&owner.name) {
+            return Ok(());
+        }
+        Err(FanError::at(
+            format!(
+                "{} 的{} {} 是私有的，只能在 {} 的方法内访问",
+                owner.name, what, name, owner.name
+            ),
+            pos,
+        ))
+    }
+
     /// 读取成员：模型字段/方法（含嵌入提升）、字典键、模块导出。
     pub fn get_member(
         &mut self,
@@ -242,6 +276,16 @@ impl Interpreter {
                     ));
                 }
                 if let Some(v) = r.value {
+                    // 私有字段只允许在所属模型自己的方法内读
+                    if let Some(owner) = &r.instance {
+                        self.check_private(
+                            &owner.class,
+                            name,
+                            Self::field_visibility(&owner.class, name),
+                            "字段",
+                            pos,
+                        )?;
+                    }
                     return Ok(v);
                 }
                 // 字段未命中，尝试方法
@@ -261,6 +305,11 @@ impl Interpreter {
                         pos,
                     ));
                 };
+                // 私有方法只允许在所属模型自己的方法内调用
+                if let Some(owner) = &m.owner_class {
+                    let vis = owner.method_vis.get(name).copied().unwrap_or_default();
+                    self.check_private(owner, name, vis, "方法", pos)?;
+                }
                 Ok(Object::Func(Rc::new(bind_method(
                     &func,
                     inst,
@@ -365,9 +414,21 @@ impl Interpreter {
         pos: Position,
     ) -> Result<(), FanError> {
         match obj.unwrap_named() {
-            Object::Instance(inst) => inst
-                .set_field_value(name, val)
-                .map_err(|e| FanError::at(e, pos)),
+            Object::Instance(inst) => {
+                // 私有字段只允许在所属模型自己的方法内写
+                let r = inst.resolve_field(name, &inst);
+                if let Some(owner) = &r.instance {
+                    self.check_private(
+                        &owner.class,
+                        name,
+                        Self::field_visibility(&owner.class, name),
+                        "字段",
+                        pos,
+                    )?;
+                }
+                inst.set_field_value(name, val)
+                    .map_err(|e| FanError::at(e, pos))
+            }
             Object::Dict(mut dict) => {
                 dict.set(Object::string(name), val);
                 Ok(())

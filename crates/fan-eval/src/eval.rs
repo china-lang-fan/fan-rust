@@ -36,6 +36,13 @@ pub struct Interpreter {
     pending_throw: Option<Object>,
     /// 本次抛出是否已被某个 `捕获()` 取走；取走后不再向外传播。
     throw_caught: bool,
+    /// 当前正在执行的方法所属模型名（调用栈），普通函数调用记为 `None`。
+    ///
+    /// 用于判定 `私有` 成员的访问是否合法：私有字段与方法只允许在本模型
+    /// 的方法体内访问。用栈是因为调用可嵌套，内层返回后要还原外层；普通
+    /// 函数记为 `None` 是为了遮蔽外层——方法里调用普通函数后，该函数体内
+    /// 不应还能访问本模型的私有成员。
+    self_class: Vec<Option<String>>,
 }
 
 /// 一条 `稍后` 登记。
@@ -104,6 +111,7 @@ impl Interpreter {
             defers: Vec::new(),
             pending_throw: None,
             throw_caught: false,
+            self_class: Vec::new(),
         }
     }
 
@@ -315,8 +323,15 @@ impl Interpreter {
                 continue;
             }
             let matched = if branch.guard {
+                // 守卫条件必须是布尔，与 `当` 循环、`如果` 保持一致
                 let v = self.eval_expr(&branch.values[0])?.into_value()?;
-                v.is_truthy()
+                let Object::Bool(v) = v.unwrap_named() else {
+                    return Err(FanError::at(
+                        format!("当 的条件必须是布尔，实际是 {}", v.kind()),
+                        branch.pos,
+                    ));
+                };
+                v
             } else {
                 let Some(target) = &subject else {
                     return Err(FanError::at("判断 分支缺少匹配对象", branch.pos));
@@ -921,6 +936,11 @@ impl Interpreter {
         env.runtime().borrow().lookup_native(name).is_some()
     }
 
+    /// 当前是否正身处指定模型的方法内——`私有` 成员的访问判定依据。
+    pub(crate) fn inside_class(&self, class_name: &str) -> bool {
+        self.self_class.last().and_then(|c| c.as_deref()) == Some(class_name)
+    }
+
     fn eval_ident(&mut self, name: &str, pos: Position) -> EvalResult {
         let env = self.env.clone();
         if let Some(v) = env.borrow().get(name) {
@@ -1306,6 +1326,11 @@ impl Interpreter {
         self.env = fn_env;
         self.fn_depth += 1;
         self.defers.push(Vec::new());
+        // 记下本次调用是否身处某模型的方法内，供 `私有` 成员的访问判定
+        self.self_class.push(match fn_obj.self_value.as_ref() {
+            Some(Object::Instance(inst)) => Some(inst.class.name.clone()),
+            _ => None,
+        });
         let rt = self.env.borrow().runtime();
         rt.borrow_mut()
             .push_fn(display_fn_name(&fn_obj), fn_obj.pos);
@@ -1315,6 +1340,8 @@ impl Interpreter {
         self.env = outer;
 
         let result = self.run_defers(result)?;
+        // 稍后块仍属本次调用，故等它执行完再还原上下文
+        self.self_class.pop();
 
         match result {
             Flow::Return(values) => value(single_or_tuple(values)),
@@ -1895,6 +1922,151 @@ mod tests {
             "类型 状态 整数\n\
              常量 状态 有效 = 状态(1)\n\
              有效 加 1",
+            "2",
+        );
+    }
+
+    // ------------------------------------------------------------ 判断
+
+    #[test]
+    fn 判断按值匹配且分支可列多个值() {
+        check(
+            "变量 x = 2\n\
+             变量 结果 = \"\"\n\
+             判断 x\n\
+                 为 1\n\
+                     结果 = \"一\"\n\
+                 为 2、3\n\
+                     结果 = \"多\"\n\
+                 其他\n\
+                     结果 = \"无\"\n\
+             结束\n\
+             结果",
+            "多",
+        );
+    }
+
+    #[test]
+    fn 判断守卫分支按顺序求值() {
+        check(
+            "变量 分数 = 85\n\
+             变量 结果 = \"\"\n\
+             判断\n\
+                 当 分数 >= 90\n\
+                     结果 = \"优秀\"\n\
+                 当 分数 >= 60\n\
+                     结果 = \"及格\"\n\
+                 其他\n\
+                     结果 = \"不及格\"\n\
+             结束\n\
+             结果",
+            "及格",
+        );
+    }
+
+    #[test]
+    fn 判断可混合值匹配与守卫() {
+        check(
+            "变量 x = 500\n\
+             变量 结果 = \"\"\n\
+             判断 x\n\
+                 为 200\n\
+                     结果 = \"成功\"\n\
+                 当 x >= 500\n\
+                     结果 = \"错误\"\n\
+             结束\n\
+             结果",
+            "错误",
+        );
+    }
+
+    #[test]
+    fn 判断守卫必须是布尔() {
+        // 与 `当` 循环、`如果` 一致：不接受靠真值性蒙混过关的整数
+        assert!(run("判断\n    当 1\n        变量 a = 1\n结束")
+            .unwrap_err()
+            .contains("布尔"));
+    }
+
+    #[test]
+    fn 判断分支不穿透() {
+        check(
+            "变量 n = 0\n\
+             判断 1\n\
+                 为 1\n\
+                     n++\n\
+                 为 1\n\
+                     n++\n\
+             结束\n\
+             n",
+            "1",
+        );
+    }
+
+    // ------------------------------------------------------------ 可见性
+
+    #[test]
+    fn 私有成员只在本模型的方法内可用() {
+        // 对齐 Go 版 visibility_test：私有字段/方法对外不可见，
+        // 但本模型的方法体内（含公开方法转调私有方法）可以
+        let model = "定义 模型 账户\n\
+             公开 变量 字符串 名字\n\
+             私有 变量 整数 余额\n\
+         结束\n\
+         定义 账户 的 方法 初始化(名字 字符串, 余额 整数)\n\
+             自己.名字 = 名字\n\
+             自己.余额 = 余额\n\
+         结束\n\
+         定义 账户 的 公开 方法 存款(数额 整数)\n\
+             自己.余额 = 自己.余额 加 数额\n\
+         结束\n\
+         定义 账户 的 私有 方法 内部密语() -> 字符串\n\
+             返回 \"密-\" + 自己.名字\n\
+         结束\n\
+         定义 账户 的 公开 方法 密语() -> 字符串\n\
+             返回 自己.内部密语()\n\
+         结束\n";
+
+        // 方法内访问私有成员、公开方法转调私有方法，都成立
+        check(
+            &format!("{model}变量 a = 账户(\"张三\", 100)\na.存款(50)\na.密语()"),
+            "密-张三",
+        );
+        check(
+            &format!("{model}变量 a = 账户(\"张三\", 100)\na.名字"),
+            "张三",
+        );
+
+        // 模型外：读私有字段、写私有字段、调私有方法，均被拒
+        assert!(run(&format!("{model}变量 a = 账户(\"张三\", 100)\na.余额"))
+            .unwrap_err()
+            .contains("私有的"));
+        assert!(
+            run(&format!("{model}变量 a = 账户(\"张三\", 100)\na.余额 = 5"))
+                .unwrap_err()
+                .contains("私有的")
+        );
+        assert!(run(&format!(
+            "{model}变量 a = 账户(\"张三\", 100)\na.内部密语()"
+        ))
+        .unwrap_err()
+        .contains("私有的"));
+    }
+
+    #[test]
+    fn 未标注可见性的字段按默认可访问() {
+        // 默认（文件级）不是私有：同一文件内照常读写
+        check(
+            "定义 模型 矩形\n\
+                 变量 整数 宽\n\
+                 变量 整数 高\n\
+             结束\n\
+             定义 矩形 的 方法 初始化(宽 整数, 高 整数)\n\
+                 自己.宽 = 宽\n\
+                 自己.高 = 高\n\
+             结束\n\
+             变量 r = 矩形(2, 3)\n\
+             r.宽",
             "2",
         );
     }
