@@ -52,6 +52,10 @@ pub struct Interpreter {
 struct Deferred {
     /// `函数调用` 或 `函数` 字面量。
     expr: ast::Expr,
+    /// 登记时就求好值的实参：`稍后 f(x)` 的 x 取**登记时刻**的值，
+    /// 而不是执行时刻。被调用者仍在执行时求值，以免把 `a.f()` 里的
+    /// 无参方法提前调用掉。
+    eager_args: Option<Vec<Object>>,
     env: Rc<RefCell<Environment>>,
 }
 
@@ -255,10 +259,25 @@ impl Interpreter {
             Stmt::Visibility(v) => self.eval_visibility(v),
             // `稍后` 语句在后续里程碑实现；此处给出明确提示而非静默通过。
             Stmt::Defer(n) => {
-                // 只登记、不执行：真正的执行发生在函数返回前
+                // 只登记、不执行：真正的执行发生在函数返回前。
+                // 实参此刻就求值并保存，执行时原样使用。
+                let eager_args = match &n.call {
+                    ast::Expr::Call(call) => {
+                        let mut vals = Vec::with_capacity(call.args.len());
+                        for a in &call.args {
+                            match a {
+                                ast::Expr::Spread(s) => vals.extend(self.spread_elements(s)?),
+                                _ => vals.push(self.eval_expr(a)?.into_value()?),
+                            }
+                        }
+                        Some(vals)
+                    }
+                    _ => None,
+                };
                 match self.defers.last_mut() {
                     Some(frame) => frame.push(Deferred {
                         expr: n.call.clone(),
+                        eager_args,
                         env: self.env.clone(),
                     }),
                     None => {
@@ -1348,7 +1367,9 @@ impl Interpreter {
             Flow::Value(v) => value(v),
             Flow::Break => Err(FanError::at("跳出 不能出现在函数外", pos)),
             Flow::Continue => Err(FanError::at("继续 不能出现在循环外", pos)),
-            Flow::Throw(v) => Err(FanError::new(format!("未捕获的抛出：{}", v.inspect()))),
+            // 抛出保持为控制流信号继续上行：本层无人接管时，要由外层函数的
+            // 稍后/捕获 处理。一路都没人管，才由顶层 run 报「未捕获的抛出」。
+            Flow::Throw(v) => Ok(Flow::Throw(v)),
         }
     }
 
@@ -1402,6 +1423,12 @@ impl Interpreter {
             ast::Expr::Function(_) => {
                 let f = self.eval_expr(&item.expr)?.into_value()?;
                 self.apply_function(&f, Vec::new(), item.expr.pos())
+            }
+            ast::Expr::Call(call) => {
+                let callee = self.eval_expr(&call.callee)?.into_value()?;
+                // 实参用登记时刻求好的那一份
+                let args = item.eager_args.clone().unwrap_or_default();
+                self.apply_function(&callee, args, item.expr.pos())
             }
             other => self.eval_expr(other),
         };
@@ -2069,6 +2096,69 @@ mod tests {
              r.宽",
             "2",
         );
+    }
+
+    #[test]
+    fn 稍后的实参在登记时求值() {
+        // 与 Go 版一致：稍后 f(x) 的 x 取登记时刻的值，而非执行时刻
+        check(
+            "变量 结果 = \"\"\n\
+             函数 记录(文本 字符串)\n\
+                 结果 = 文本\n\
+             结束\n\
+             函数 f()\n\
+                 变量 文本 = \"旧\"\n\
+                 稍后 记录(文本)\n\
+                 文本 = \"新\"\n\
+             结束\n\
+             f()\n\
+             结果",
+            "旧",
+        );
+    }
+
+    #[test]
+    fn 跨函数抛出由外层稍后捕获() {
+        // 抛出要能越过函数边界上行，交给外层函数的 稍后/捕获 处理
+        check(
+            "变量 全局结果 = 空\n\
+             函数 内层()\n\
+                 抛出 123\n\
+             结束\n\
+             函数 外层()\n\
+                 稍后 函数()\n\
+                     全局结果 = 捕获()\n\
+                 结束\n\
+                 内层()\n\
+             结束\n\
+             外层()\n\
+             全局结果",
+            "123",
+        );
+    }
+
+    #[test]
+    fn 无人捕获的抛出向外报错() {
+        assert!(run("函数 f()\n    抛出 \"坏\"\n结束\nf()")
+            .unwrap_err()
+            .contains("未捕获的抛出"));
+    }
+
+    #[test]
+    fn 非稍后中的捕获为空() {
+        check("函数 f()\n    返回 捕获()\n结束\nf()", "空");
+    }
+
+    #[test]
+    fn 无参函数在语句位置自动调用() {
+        check("变量 n = 0\n函数 计数()\n    n++\n结束\n计数\nn", "1");
+    }
+
+    #[test]
+    fn 字符字面量支持全角引号() {
+        check("变量 字符 c = 'A'\nc", "A");
+        check("变量 字符 c = '中'\nc", "中");
+        check("变量 字符 c = ‘A’\nc", "A");
     }
 
     #[test]
