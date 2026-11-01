@@ -225,18 +225,24 @@ impl Runtime {
 
     /// 打印若干值。单参数为数组时展开其元素（与 Go 版 `printObjects` 一致）。
     pub fn print_objects(&mut self, args: &[Object]) {
-        let values: Vec<Object> = if args.len() == 1 {
-            match &args[0] {
-                Object::Array(a) => a.elements(),
-                other => vec![other.clone()],
+        // 打印的是**一个数组**：展开元素，之间加空格，便于阅读。
+        // 打印的是**多个实参**：原样逐个拼接，不插分隔——要不要空格由调用
+        // 方自己写进实参，语言不替调用方决定。
+        let out = match args {
+            [Object::Array(a)] => a
+                .elements()
+                .iter()
+                .map(Object::inspect)
+                .collect::<Vec<_>>()
+                .join(" "),
+            _ => {
+                let mut out = String::new();
+                for v in args {
+                    out.push_str(&v.inspect());
+                }
+                out
             }
-        } else {
-            args.to_vec()
         };
-        let mut out = String::new();
-        for v in values {
-            out.push_str(&v.inspect());
-        }
         let sink = self.stdout.clone();
         let _ = sink.borrow_mut().write_all(out.as_bytes());
         let _ = sink.borrow_mut().flush();
@@ -332,20 +338,33 @@ mod tests {
     }
 
     #[test]
-    fn 打印写入输出目标() {
+    fn 打印多个实参不加分隔() {
+        // 按参数打印：结果之间不插空格，要不要分隔由调用方自己写进实参
         let (mut rt, buf) = runtime_with_buffer();
         rt.print_objects(&[Object::string("你好"), Object::int(1)]);
         assert_eq!(String::from_utf8(buf.borrow().clone()).unwrap(), "你好1");
     }
 
     #[test]
-    fn 打印单参数数组时展开元素() {
+    fn 打印单个数组时元素间加空格() {
+        // 打印的是数组本身：展开元素，之间加空格
         let (mut rt, buf) = runtime_with_buffer();
         rt.print_objects(&[Object::Array(FanArray::new(vec![
             Object::int(1),
             Object::int(2),
         ]))]);
-        assert_eq!(String::from_utf8(buf.borrow().clone()).unwrap(), "12");
+        assert_eq!(String::from_utf8(buf.borrow().clone()).unwrap(), "1 2");
+    }
+
+    #[test]
+    fn 数组作实参之一时仍按原样显示() {
+        // 不是「打印一个数组」，而是若干实参里的一个：保留 [1, 2] 的形式
+        let (mut rt, buf) = runtime_with_buffer();
+        rt.print_objects(&[
+            Object::string("甲"),
+            Object::Array(FanArray::new(vec![Object::int(1), Object::int(2)])),
+        ]);
+        assert_eq!(String::from_utf8(buf.borrow().clone()).unwrap(), "甲[1, 2]");
     }
 
     #[test]
