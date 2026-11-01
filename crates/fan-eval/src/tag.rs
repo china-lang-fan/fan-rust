@@ -4,12 +4,11 @@
 //! 处理器框架：每种标签名对应一个 [`TagHandler`]，通过 [`TagRegistry`] 分发。
 //! 新增标签只需实现 `TagHandler` 并注册，无需改动求值器。
 //!
-//! 当前内置两种标签：
+//! 当前内置一种标签：
 //!
 //! | 标签 | 作用 |
 //! |---|---|
-//! | `@内建("名字")` | 把函数绑定到 `core` 组原生实现（纯标准库，始终可用） |
-//! | `@内建模块("模块名")` | 按需加载对应的扩展动态库，使其内建可用 |
+//! | `@内建("名字")` | 把函数绑定到原生实现，名字可带模块前缀，见 [`BuiltinTag`] |
 //!
 //! 对应 Go 版 `evaluator/tag.go`。Go 版把标签建模为「标签模型 + 处理器 +
 //! 可替换调用目标」的通用机制，而凡语言标准库实际只用这一种用途，因此这里
@@ -24,8 +23,6 @@ use std::rc::Rc;
 
 /// `@内建` 标签名。
 pub const 内建标签: &str = "内建";
-/// `@内建模块` 标签名。
-pub const 内建模块标签: &str = "内建模块";
 
 /// 标签应用的上下文：解释器、被标注的函数、标签本身。
 pub struct TagContext<'a> {
@@ -62,7 +59,6 @@ impl TagRegistry {
             handlers: HashMap::new(),
         };
         registry.register(Rc::new(BuiltinTag));
-        registry.register(Rc::new(ExtModuleTag));
         registry
     }
 
@@ -100,14 +96,30 @@ impl TagHandler for BuiltinTag {
     }
 
     fn apply(&self, ctx: &mut TagContext<'_>) -> Result<(), FanError> {
-        let native_name = string_arg(ctx.tag)?;
+        let spec = string_arg(ctx.tag)?;
+        let pos = ctx.tag.pos;
+        // 名字可写成 `模块名.函数名`：模块名用于加载对应的扩展库（找不到
+        // 扩展库时回落到内置默认实现），函数名指定其中的原生函数。
+        // 不写模块名时，取系统已注册的默认函数。
+        let (module, native_name) = match spec.split_once('.') {
+            Some((m, f)) if !m.is_empty() && !f.is_empty() => (Some(m.to_string()), f.to_string()),
+            _ => (None, spec.clone()),
+        };
+
         let rt = ctx.interp.env.borrow().runtime();
+        if let Some(module) = &module {
+            let loaded = {
+                let mut rt_mut = rt.borrow_mut();
+                ctx.interp.ext.borrow_mut().ensure(&mut rt_mut, module)
+            };
+            loaded.map_err(|e| FanError::at(e, pos))?;
+        }
+
         let found = rt.borrow().lookup_native(&native_name);
         let builtin = match found {
             Some(b) => b,
-            None => {
-                // 未注册：先尝试按需登记其所属扩展模块（有扩展库用扩展库，
-                // 没有则用默认实现），再重新查找。
+            // 未写模块名：按函数名反查所属模块并加载，兼容只写函数名的写法
+            None if module.is_none() => {
                 let source = {
                     let mut rt_mut = rt.borrow_mut();
                     ctx.interp
@@ -118,40 +130,29 @@ impl TagHandler for BuiltinTag {
                 if source.is_err() {
                     return Err(FanError::at(
                         format!("标签 @{} 引用的原生函数 {} 未注册", 内建标签, native_name),
-                        ctx.tag.pos,
+                        pos,
                     ));
                 }
                 rt.borrow().lookup_native(&native_name).ok_or_else(|| {
                     FanError::at(
                         format!("标签 @{} 引用的原生函数 {} 未注册", 内建标签, native_name),
-                        ctx.tag.pos,
+                        pos,
                     )
                 })?
+            }
+            None => {
+                return Err(FanError::at(
+                    format!(
+                        "模块 {} 中没有原生函数 {}",
+                        module.unwrap_or_default(),
+                        native_name
+                    ),
+                    pos,
+                ))
             }
         };
         ctx.func.native_impl = Some(builtin);
         Ok(())
-    }
-}
-
-/// `@内建模块("模块名")`：加载扩展动态库，使其内建进入查找表。
-///
-/// 不使用该标签的程序不会加载任何扩展依赖。
-struct ExtModuleTag;
-
-impl TagHandler for ExtModuleTag {
-    fn name(&self) -> &str {
-        内建模块标签
-    }
-
-    fn apply(&self, ctx: &mut TagContext<'_>) -> Result<(), FanError> {
-        let module = string_arg(ctx.tag)?;
-        let rt = ctx.interp.env.borrow().runtime();
-        let result = {
-            let mut rt_mut = rt.borrow_mut();
-            ctx.interp.ext.borrow_mut().ensure(&mut rt_mut, &module)
-        };
-        result.map(|_| ()).map_err(|e| FanError::at(e, ctx.tag.pos))
     }
 }
 
@@ -253,11 +254,11 @@ mod tests {
     // ------------------------------------------------------ 框架单元测试
 
     #[test]
-    fn 注册表默认含两个内置标签() {
+    fn 注册表默认含内置标签() {
         let registry = TagRegistry::with_builtins();
         let mut names = registry.names();
         names.sort_unstable();
-        assert_eq!(names, vec![内建标签, 内建模块标签]);
+        assert_eq!(names, vec![内建标签]);
     }
 
     #[test]
@@ -382,6 +383,43 @@ mod tests {
             .contains("未注册"));
     }
 
+    // ------------------------------------------------------ @内建 的模块名
+
+    #[test]
+    fn 内建标签可写模块名前缀() {
+        // `模块名.函数名`：模块名用于加载扩展库，没有库时回落内置默认实现
+        check(
+            "@内建(\"json.jsonEncode\")\n函数 生成(值)\n    返回 空\n结束\n生成([1, 2])",
+            "([1,2], 空)",
+        );
+    }
+
+    #[test]
+    fn 内建标签不写模块名时取默认实现() {
+        // 不写模块名：沿用按函数名反查所属模块的兼容路径
+        check(
+            "@内建(\"jsonEncode\")\n函数 生成(值)\n    返回 空\n结束\n生成([1, 2])",
+            "([1,2], 空)",
+        );
+    }
+
+    #[test]
+    fn 内建标签的模块名不存在时报错() {
+        let (program, _) =
+            parse_program("@内建(\"不存在的模块.某某\")\n函数 甲()\n    返回 0\n结束\n");
+        let mut interp = interp_with_native();
+        let err = interp.run(&program).unwrap_err().display();
+        assert!(err.contains("既没有扩展库"), "实际：{}", err);
+    }
+
+    #[test]
+    fn 内建标签的函数名不在模块中时报错() {
+        let (program, _) = parse_program("@内建(\"json.不存在\")\n函数 甲()\n    返回 0\n结束\n");
+        let mut interp = interp_with_native();
+        let err = interp.run(&program).unwrap_err().display();
+        assert!(err.contains("没有原生函数"), "实际：{}", err);
+    }
+
     #[test]
     fn 未知标签名报错() {
         let (program, _) = parse_program("@自定义\n函数 加倍(数)\n    返回 0\n结束\n");
@@ -391,15 +429,6 @@ mod tests {
             .unwrap_err()
             .display()
             .contains("未定义标签处理器"));
-    }
-
-    #[test]
-    fn 内建模块标签找不到库时报错() {
-        let (program, _) =
-            parse_program("@内建模块(\"不存在的库\")\n函数 加倍(数)\n    返回 0\n结束\n");
-        let mut interp = interp_with_native();
-        let err = interp.run(&program).unwrap_err().display();
-        assert!(err.contains("既没有扩展库"), "实际：{}", err);
     }
 
     #[test]
@@ -414,7 +443,6 @@ mod tests {
     fn 解释器的标签注册表可用() {
         let interp = Interpreter::new();
         assert!(interp.tags.names().contains(&内建标签));
-        assert!(interp.tags.names().contains(&内建模块标签));
     }
 
     #[test]

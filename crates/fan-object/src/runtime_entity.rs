@@ -416,7 +416,7 @@ pub type NativeImpl = Rc<dyn Fn(&mut crate::Runtime, Vec<Object>) -> Result<Vec<
 
 /// 内建函数分组。
 ///
-/// 解释器只内置 `Core` 组；`Ext` 组位于独立动态库，由 `@内建模块` 标签
+/// 解释器只内置 `Core` 组；`Ext` 组位于独立动态库，由 `@内建("模块名.函数名")`
 /// 按需加载，因此不使用扩展能力的程序无需加载任何第三方依赖。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NativeGroup {

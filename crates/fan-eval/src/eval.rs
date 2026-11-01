@@ -19,7 +19,7 @@ pub struct Interpreter {
     pub loader: Rc<RefCell<crate::module::Loader>>,
     /// 标签处理器注册表。
     pub tags: crate::tag::TagRegistry,
-    /// 扩展动态库登记表：仅在出现 `@内建模块` 时才加载。
+    /// 扩展动态库登记表：仅在 `@内建` 引用了该模块的原生函数时才加载。
     ///
     /// 与主程序、各子模块共享同一份：动态库一旦加载就无法卸载，登记表是
     /// 进程级状态，若各自持有会导致同一库被重复登记。
