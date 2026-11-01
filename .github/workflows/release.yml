@@ -78,7 +78,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: macos-latest # Apple Silicon
             target: aarch64-apple-darwin
-          - os: macos-13 # Intel
+          # 用新的 Intel 标签：macos-13 机型正退役，排队常等数十分钟
+          - os: macos-15-intel
             target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
