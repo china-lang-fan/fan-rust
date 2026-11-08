@@ -7,7 +7,10 @@
 use crate::error::{value, EvalResult, FanError, Flow};
 use crate::operators;
 use fan_ast::{self as ast, BlockStmt, DeclType, Expr, Position, Program, Stmt, Visibility};
-use fan_object::{Builtin, Environment, FanArray, FanDict, Object, Runtime};
+use fan_object::{
+    check_decl_type, kind_display_name, runtime_type_name, Builtin, Environment, FanArray,
+    FanDict, Object, Runtime,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -209,6 +212,12 @@ impl Interpreter {
                 Flow::Continue => return Err(FanError::new("继续 不能出现在循环外")),
                 Flow::Throw(v) => {
                     return Err(FanError::new(format!("未捕获的抛出：{}", v.inspect())))
+                }
+                Flow::Check(v, p) => {
+                    return Err(FanError::at(
+                        format!("未捕获的检查错误：{}", v.inspect()),
+                        p,
+                    ))
                 }
             }
         }
@@ -595,7 +604,12 @@ impl Interpreter {
         }
         let mut values = Vec::new();
         for e in &stmt.values {
-            values.push(self.eval_expr(e)?.into_value()?);
+            // `返回 检查 调用` 命中错误时，检查信号要原样冒泡到函数边界，
+            // 不能经 into_value 转成运行时错误。
+            match self.eval_expr(e)? {
+                Flow::Value(v) => values.push(v),
+                signal => return Ok(signal),
+            }
         }
         if values.is_empty() {
             values.push(Object::Nil);
@@ -614,8 +628,23 @@ impl Interpreter {
                 .map_err(|e| FanError::at(e, decl.pos))?;
             return value(Object::Nil);
         }
-        let val = self.eval_expr(decl.value.as_ref().unwrap())?.into_value()?;
+        let val = match self.eval_expr(decl.value.as_ref().unwrap())? {
+            Flow::Value(v) => v,
+            // `变量 x = 检查 调用` 命中错误时，检查信号向函数边界冒泡
+            signal => return Ok(signal),
+        };
         let env = self.env.clone();
+        // 分段函数：除按全名绑定外，额外登记到 mixfix 注册表，支持按参数类型重载。
+        if let Object::Func(f) = &val {
+            if f.is_segmented() {
+                let root = f.name_segments[0].clone();
+                let signature = f.signature.clone();
+                let rt = env.borrow().runtime();
+                rt.borrow_mut()
+                    .register_mixfix(&root, &signature, f.clone())
+                    .map_err(|reason| FanError::at(reason, decl.pos))?;
+            }
+        }
         let mut e = env.borrow_mut();
 
         if decl.is_explicit {
@@ -647,7 +676,10 @@ impl Interpreter {
     }
 
     fn eval_assign(&mut self, stmt: &ast::AssignStmt) -> EvalResult {
-        let val = self.eval_expr(&stmt.value)?.into_value()?;
+        let val = match self.eval_expr(&stmt.value)? {
+            Flow::Value(v) => v,
+            signal => return Ok(signal),
+        };
         let env = self.env.clone();
         env.borrow_mut()
             .assign(&stmt.name, val.clone())
@@ -687,7 +719,10 @@ impl Interpreter {
             }
             return value(Object::Nil);
         }
-        let val = self.eval_expr(&decl.value)?.into_value()?;
+        let val = match self.eval_expr(&decl.value)? {
+            Flow::Value(v) => v,
+            signal => return Ok(signal),
+        };
         let values = require_tuple(decl.pos, val, decl.names.len())?;
         let env = self.env.clone();
         let mut e = env.borrow_mut();
@@ -699,7 +734,10 @@ impl Interpreter {
     }
 
     fn eval_multi_assign(&mut self, stmt: &ast::MultiAssign) -> EvalResult {
-        let val = self.eval_expr(&stmt.value)?.into_value()?;
+        let val = match self.eval_expr(&stmt.value)? {
+            Flow::Value(v) => v,
+            signal => return Ok(signal),
+        };
         let values = require_tuple(stmt.pos, val, stmt.names.len())?;
         let env = self.env.clone();
         let mut e = env.borrow_mut();
@@ -941,6 +979,7 @@ impl Interpreter {
                 }
             }
             Expr::Through(t) => self.eval_through(t),
+            Expr::Check(n) => self.eval_check(n),
             Expr::ImplicitReceiverCall(n) => self.eval_implicit_receiver_call(n),
             _ => Err(FanError::new(format!("暂未支持的表达式：{}", expr))),
         }
@@ -1218,6 +1257,35 @@ impl Interpreter {
                 return value(self.pending_throw.clone().unwrap_or(Object::Nil));
             }
         }
+
+        // 分段函数：先求值实参，再按运行时类型重建签名做重载分派。
+        if let Some(root) = n.mixfix_root.clone() {
+            let mut args = Vec::with_capacity(n.args.len());
+            for a in &n.args {
+                match a {
+                    Expr::Spread(s) => args.extend(self.spread_elements(s)?),
+                    other => args.push(self.eval_expr(other)?.into_value()?),
+                }
+            }
+            let signature = {
+                let env_ref = self.env.borrow();
+                build_runtime_mixfix_signature(&root, &args, &env_ref)
+            };
+            let func = {
+                let rt = self.env.borrow().runtime();
+                let rt_ref = rt.borrow();
+                rt_ref.lookup_mixfix(&root, &signature)
+            };
+            if let Some(func) = func {
+                let callee = Object::Func(func);
+                return self.apply_function(&callee, args, n.pos);
+            }
+            return Err(FanError::at(
+                format!("找不到匹配的分段函数：{signature}"),
+                n.pos,
+            ));
+        }
+
         let callee = self.eval_expr(&n.callee)?.into_value()?;
         let mut args = Vec::with_capacity(n.args.len());
         for a in &n.args {
@@ -1240,6 +1308,26 @@ impl Interpreter {
                 n.pos,
             )),
         }
+    }
+
+    /// `检查 调用`：调用结果末尾携带错误时，立即向当前函数边界冒泡。
+    ///
+    /// 与 Go 版 `evalCheckExpr` 对齐：
+    /// - 调用本身求值出错（含内层 `检查` 冒泡上来的信号）原样向上传播；
+    /// - 返回值是错误，或多元值最后一个元素是错误时，产生 `Flow::Check`；
+    /// - 多元值末尾是 `错误/空` 约定位时剥掉该位，只返回前面的真实结果。
+    fn eval_check(&mut self, n: &ast::CheckExpr) -> EvalResult {
+        let val = self.eval_expr(&n.call)?;
+        let val = match val {
+            // 内层检查/抛出等控制流信号直接向上冒泡
+            signal @ (Flow::Return(_) | Flow::Break | Flow::Continue | Flow::Throw(_)
+            | Flow::Check(_, _)) => return Ok(signal),
+            Flow::Value(v) => v,
+        };
+        if let Some(err) = error_from_value(&val) {
+            return Ok(Flow::Check(err, n.pos));
+        }
+        value(strip_error_tail(val))
     }
 
     /// 调用凡函数：新建作用域、绑定实参、执行函数体。
@@ -1298,6 +1386,53 @@ impl Interpreter {
             Some(e) => Environment::enclosed(e.clone()),
             None => Environment::enclosed(self.env.clone()),
         }));
+        // 先求值默认值并完成参数类型校验。每次校验单独借用，避免默认值
+        // 求值触发嵌套调用时与长期借用冲突。
+        let mut bound: Vec<(String, Object, fan_ast::DeclType)> = Vec::new();
+        {
+            let mut idx = 0usize;
+            for param in &param_list {
+                if param.variadic {
+                    let rest = args.get(idx..).unwrap_or(&[]).to_vec();
+                    for val in &rest {
+                        check_decl_type(&param.type_, val, &fn_env.borrow()).map_err(
+                            |reason| {
+                                FanError::at(
+                                    format!("参数 {} 类型不匹配：{}", param.name, reason),
+                                    pos,
+                                )
+                            },
+                        )?;
+                    }
+                    bound.push((param.name.clone(), Object::array(rest), param.type_.clone()));
+                    break;
+                }
+                let value = match args.get(idx) {
+                    Some(v) => {
+                        idx += 1;
+                        v.clone()
+                    }
+                    None => match &param.default {
+                        Some(expr) => {
+                            let mut sub = Interpreter::with_env(
+                                self,
+                                fn_env.clone(),
+                                self.loader.clone(),
+                            );
+                            sub.eval_expr(expr)?.into_value()?
+                        }
+                        None => Object::Nil,
+                    },
+                };
+                check_decl_type(&param.type_, &value, &fn_env.borrow()).map_err(|reason| {
+                    FanError::at(
+                        format!("参数 {} 类型不匹配：{}", param.name, reason),
+                        pos,
+                    )
+                })?;
+                bound.push((param.name.clone(), value, param.type_.clone()));
+            }
+        }
         {
             let mut e = fn_env.borrow_mut();
             // 绑定接收者：方法体内的 `自己`
@@ -1308,35 +1443,8 @@ impl Interpreter {
                     fan_ast::DeclType::any(),
                 );
             }
-            let mut idx = 0usize;
-            let _ = &mut idx;
-            for param in &param_list {
-                if param.variadic {
-                    let rest = args.get(idx..).unwrap_or(&[]).to_vec();
-                    e.set_local(param.name.clone(), Object::array(rest), param.type_.clone());
-                    break;
-                }
-                match args.get(idx) {
-                    Some(v) => {
-                        e.set_local(param.name.clone(), v.clone(), param.type_.clone());
-                        idx += 1;
-                    }
-                    None => {
-                        // 使用默认值或 空
-                        let default = match &param.default {
-                            Some(expr) => {
-                                let mut sub = Interpreter::with_env(
-                                    self,
-                                    fn_env.clone(),
-                                    self.loader.clone(),
-                                );
-                                sub.eval_expr(expr)?.into_value()?
-                            }
-                            None => Object::Nil,
-                        };
-                        e.set_local(param.name.clone(), default, param.type_.clone());
-                    }
-                }
+            for (name, value, dt) in bound {
+                e.set_local(name, value, dt);
             }
         }
 
@@ -1354,6 +1462,14 @@ impl Interpreter {
         rt.borrow_mut()
             .push_fn(display_fn_name(&fn_obj), fn_obj.pos);
         let result = self.eval_block_no_scope(&fn_obj.body);
+        // `检查` 冒泡到本函数边界：在弹出当前栈帧之前先为错误补调用栈，
+        // 这样沿调用链每一层都能把自己的帧累积进去（与 Go 版 cs.err.Stack 一致）。
+        if let Ok(Flow::Check(Object::Error(cell), _)) = &result {
+            let mut ev = cell.borrow_mut();
+            if ev.stack.is_empty() {
+                ev.stack = rt.borrow().stack();
+            }
+        }
         rt.borrow_mut().pop_fn();
         self.fn_depth -= 1;
         self.env = outer;
@@ -1362,14 +1478,43 @@ impl Interpreter {
         // 稍后块仍属本次调用，故等它执行完再还原上下文
         self.self_class.pop();
 
+        let return_types = fn_obj.return_types.clone();
+        let check_env = self.env.clone();
+        let coerce = |values: Vec<Object>| -> Result<Vec<Object>, FanError> {
+            coerce_return_values(pos, &return_types, values, &check_env.borrow())
+        };
+
         match result {
-            Flow::Return(values) => value(single_or_tuple(values)),
-            Flow::Value(v) => value(v),
+            Flow::Return(values) => {
+                let values = coerce(values)?;
+                value(single_or_tuple(values))
+            }
+            Flow::Value(v) => {
+                let values = coerce(vec![v])?;
+                value(single_or_tuple(values))
+            }
             Flow::Break => Err(FanError::at("跳出 不能出现在函数外", pos)),
-            Flow::Continue => Err(FanError::at("继续 不能出现在循环外", pos)),
+            Flow::Continue => Err(FanError::at("继续 不能出现在函数外", pos)),
             // 抛出保持为控制流信号继续上行：本层无人接管时，要由外层函数的
             // 稍后/捕获 处理。一路都没人管，才由顶层 run 报「未捕获的抛出」。
             Flow::Throw(v) => Ok(Flow::Throw(v)),
+            // `检查` 冒泡到当前函数边界（对齐 Go checkReturn）：
+            // 仅当函数声明了以 `错误` 收尾的返回类型时，才把错误作为正常返回值
+            // 交回调用方（其余位补零值）；否则继续向更外层冒泡。
+            Flow::Check(err, check_pos) => {
+                let catches = matches!(return_types.last(), Some(dt) if dt.0 == "错误");
+                if !catches {
+                    return Ok(Flow::Check(err, check_pos));
+                }
+                let mut values: Vec<Object> = return_types
+                    .iter()
+                    .take(return_types.len() - 1)
+                    .map(|dt| zero_value_for_type(dt, &check_env.borrow()))
+                    .collect();
+                values.push(err);
+                let values = coerce(values)?;
+                value(single_or_tuple(values))
+            }
         }
     }
 
@@ -1439,13 +1584,152 @@ impl Interpreter {
 
 // ---------------------------------------------------------------- 辅助
 
+/// 按声明类型构造零值（与 Go 版 `zeroValueForType` 对齐）：
+/// 命名类型按底层零值包一层身份；未知/模型/接口统一退化为 `空`。
+fn zero_value_for_type(dt: &DeclType, env: &Environment) -> Object {
+    if !dt.is_any() {
+        if let Some(nt) = env.runtime().borrow().lookup_named_type(&dt.0).cloned() {
+            let base = zero_value_for_type(&nt.base_type, env);
+            return Object::named(nt.name, base);
+        }
+    }
+    match dt.0.as_str() {
+        "整数" => Object::Int(0),
+        "小数" => Object::Float(0.0),
+        "字符串" => Object::string(""),
+        "布尔" => Object::Bool(false),
+        "数组" => Object::array(Vec::new()),
+        "字典" => Object::Dict(FanDict::new()),
+        "字节" => Object::Byte(0),
+        "字符" => Object::Char('\0'),
+        // 错误位、空、模型、接口及其余类型统一为空
+        _ => Object::Nil,
+    }
+}
+
 /// 多返回值合并：单个值直接返回，多个值包装为多元值。
-pub(crate) fn single_or_tuple(values: Vec<Object>) -> Object {
-    match values.len() {
+/// 运行时实参 → 分段签名使用的中文类型标签，与 parser 声明期类型名对齐。
+/// 模型实例用模型名，命名类型解包到底层后按模型/内置名给出。
+fn mixfix_type_label(value: &Object) -> String {
+    match value.unwrap_named() {
+        Object::Instance(inst) => inst.class.name.clone(),
+        other => {
+            let kind = runtime_type_name(&other);
+            match kind_display_name(kind) {
+                "未知" => kind.to_string(),
+                name => name.to_string(),
+            }
+        }
+    }
+}
+
+/// 按调用实参的运行时类型重建分段函数签名。
+///
+/// 形如 `修改(整数)的状态为(字符串)`，与 parser 的 `build_mixfix_signature`
+/// 产出同构，只是类型标签来自实参而非声明。
+fn build_runtime_mixfix_signature(
+    root: &str,
+    args: &[Object],
+    env: &Environment,
+) -> String {
+    // 从注册表中取出该 root 下任一已登记函数，借它的分段结构（段名/连接词/分组大小）。
+    let rt = env.runtime();
+    let rt_ref = rt.borrow();
+    let Some((_, sample)) = rt_ref
+        .mixfix_functions
+        .get(root)
+        .and_then(|table| table.iter().next())
+    else {
+        return root.to_string();
+    };
+
+    let mut out = String::new();
+    let mut index = 0usize;
+    for (seg_index, segment) in sample.name_segments.iter().enumerate() {
+        out.push_str(&sample.connectors[seg_index]);
+        out.push_str(segment);
+        out.push('(');
+        let group_size = sample.group_sizes[seg_index];
+        for offset in 0..group_size {
+            if offset > 0 {
+                out.push_str(", ");
+            }
+            if let Some(v) = args.get(index + offset) {
+                out.push_str(&mixfix_type_label(v));
+            }
+        }
+        out.push(')');
+        index += group_size;
+    }
+    out
+}
+
+pub(crate) fn single_or_tuple(values: Vec<Object>) -> Object {    match values.len() {
         0 => Object::Nil,
         1 => values.into_iter().next().unwrap(),
         _ => Object::tuple(values),
     }
+}
+
+/// 从调用结果中取错误值：单个错误，或多元值末尾的错误（与 Go `errorFromValue` 一致）。
+fn error_from_value(val: &Object) -> Option<Object> {
+    match val {
+        Object::Error(_) => Some(val.clone()),
+        Object::Tuple(t) => t.last().filter(|last| last.is_error()).cloned(),
+        _ => None,
+    }
+}
+
+/// 剥掉多元值末尾约定的 `错误/空` 位；单元素则直接返回该元素（与 Go `stripErrorTail` 一致）。
+fn strip_error_tail(val: Object) -> Object {
+    if let Object::Tuple(t) = &val {
+        if t.len() > 1 {
+            if let Some(last) = t.last() {
+                if matches!(last.kind(), fan_object::Kind::Error | fan_object::Kind::Nil) {
+                    let values: Vec<Object> = t[..t.len() - 1].to_vec();
+                    return single_or_tuple(values);
+                }
+            }
+        }
+    }
+    val
+}
+
+/// 按函数声明的返回类型校验返回值；未声明返回类型时不约束。
+///
+/// 与 Go 版 `coerceReturnValues` 一致：先比对返回值数量，再逐项做名义类型检查；
+/// 声明为 `错误` 的位置允许 `空`。
+fn coerce_return_values(
+    pos: Position,
+    types: &[fan_ast::DeclType],
+    values: Vec<Object>,
+    env: &Environment,
+) -> Result<Vec<Object>, FanError> {
+    if types.is_empty() {
+        return Ok(values);
+    }
+    if types.len() != values.len() {
+        return Err(FanError::at(
+            format!(
+                "返回值数量不符：声明 {} 个，实际 {} 个",
+                types.len(),
+                values.len()
+            ),
+            pos,
+        ));
+    }
+    for (i, dt) in types.iter().enumerate() {
+        let v = values
+            .get(i)
+            .cloned()
+            .unwrap_or(Object::Nil);
+        if matches!(v, Object::Nil) && dt.0 == "错误" {
+            continue;
+        }
+        check_decl_type(dt, &v, env)
+            .map_err(|reason| FanError::at(format!("第 {} 个返回值{}", i + 1, reason), pos))?;
+    }
+    Ok(values)
 }
 
 /// 拆分多元值；数量不符时给出中文错误（与 Go 版 `requireTuple` 一致）。
@@ -1764,10 +2048,194 @@ mod tests {
             "函数 标记(值 字符串)的状态为无效() -> 字符串\n\
                  返回 值 + \":无效\"\n\
              结束\n\
-             标记(\"b\")的状态为无效",
+              标记(\"b\")的状态为无效",
             "b:无效",
         );
     }
+
+    #[test]
+    fn 分段函数按参数类型重载() {
+        check(
+            "函数 修改(值 字符串)的状态为(状态 字符串) -> 字符串\n\
+                 返回 \"字符串\"\n\
+             结束\n\
+             函数 修改(值 整数)的状态为(状态 字符串) -> 字符串\n\
+                 返回 \"整数\"\n\
+             结束\n\
+             修改(\"x\")的状态为(\"a\")",
+            "字符串",
+        );
+        check(
+            "函数 修改(值 字符串)的状态为(状态 字符串) -> 字符串\n\
+                 返回 \"字符串\"\n\
+             结束\n\
+             函数 修改(值 整数)的状态为(状态 字符串) -> 字符串\n\
+                 返回 \"整数\"\n\
+             结束\n\
+             修改(1)的状态为(\"a\")",
+            "整数",
+        );
+    }
+
+    #[test]
+    fn 同签名分段函数重复定义报错() {
+        let err = run(
+            "函数 修改(值 字符串)的状态为(状态 字符串) -> 字符串\n\
+                 返回 \"一\"\n\
+             结束\n\
+             函数 修改(值 字符串)的状态为(状态 字符串) -> 字符串\n\
+                 返回 \"二\"\n\
+             结束\n\
+             修改(\"x\")的状态为(\"a\")",
+        )
+        .unwrap_err();
+        assert!(err.contains("重复的分段函数签名"), "实际：{err}");
+    }
+
+    #[test]
+    fn 相似根段名互不串扰() {
+        // 修改 与 修改用户 是两个独立 root，不能因前缀关系误分派
+        check(
+            "模型 用户\n    变量 字符串 名\n结束\n\
+             模型 状态\n    变量 字符串 值\n结束\n\
+             函数 修改用户(当前用户 用户)的状态为(新状态 状态) -> 字符串\n\
+                 返回 当前用户.名 + \":\" + 新状态.值\n\
+             结束\n\
+             函数 修改(值 字符串)的状态为(状态 字符串) -> 字符串\n\
+                 返回 \"字符串\"\n\
+             结束\n\
+             函数 修改(值 整数)的状态为(状态 字符串) -> 字符串\n\
+                 返回 \"整数\"\n\
+             结束\n\
+             变量 u = 用户()\nu.名 = \"张三\"\n\
+             变量 s = 状态()\ns.值 = \"无效\"\n\
+             修改用户(u)的状态为(s)",
+            "张三:无效",
+        );
+        check(
+            "模型 用户\n    变量 字符串 名\n结束\n\
+             函数 修改用户(当前用户 用户)的状态为(标记 字符串) -> 字符串\n\
+                 返回 \"用户\"\n\
+             结束\n\
+             函数 修改(值 整数)的状态为(状态 字符串) -> 字符串\n\
+                 返回 \"整数\"\n\
+             结束\n\
+             修改(1)的状态为(\"a\")",
+            "整数",
+        );
+    }
+
+    #[test]
+    fn 无匹配分段签名时报错() {
+        let err = run(
+            "函数 修改(值 字符串)的状态为(状态 字符串) -> 字符串\n\
+                 返回 \"字符串\"\n\
+             结束\n\
+             修改(1)的状态为(\"a\")",
+        )
+        .unwrap_err();
+        assert!(err.contains("找不到匹配的分段函数"), "实际：{err}");
+    }
+
+    #[test]
+    fn 检查成功剥掉错误位() {
+        check(
+            "函数 f() -> (整数, 错误)\n\
+                 返回 42、空\n\
+             结束\n\
+             变量 x = 检查 f()\n\
+             x",
+            "42",
+        );
+    }
+
+    #[test]
+    fn 检查命中错误由当前函数接住() {
+        // 安全除法声明了 (整数, 错误)，检查 命中后补零值并把错误作为正常返回
+        let res = run(
+            "函数 除法(a 整数, b 整数) -> (整数, 错误)\n\
+                 如果 b 等于 0 那么\n\
+                     返回 0、错误(\"零\")\n\
+                 结束\n\
+                 返回 a / b、空\n\
+             结束\n\
+             函数 安全除法() -> (整数, 错误)\n\
+                 返回 检查 除法(10, 0)\n\
+             结束\n\
+             变量 r、e = 安全除法()\n\
+             e",
+        )
+        .unwrap();
+        match res {
+            Object::Error(cell) => {
+                assert_eq!(cell.borrow().message, "零");
+            }
+            other => panic!("期望错误值，实际：{}", other.inspect()),
+        }
+    }
+
+    #[test]
+    fn 检查错误沿调用链传播并记录栈() {
+        let res = run(
+            "函数 底层() -> (字符串, 错误)\n\
+                 返回 \"\"、错误(\"打不开\")\n\
+             结束\n\
+             函数 中层() -> (字符串, 错误)\n\
+                 返回 检查 底层()\n\
+             结束\n\
+             函数 顶层() -> (字符串, 错误)\n\
+                 返回 检查 中层()\n\
+             结束\n\
+             变量 结果、e = 顶层()\n\
+             e",
+        )
+        .unwrap();
+        match res {
+            Object::Error(cell) => {
+                let ev = cell.borrow();
+                assert_eq!(ev.message, "打不开");
+                let names: Vec<&str> = ev.stack.iter().map(|f| f.function.as_str()).collect();
+                assert!(names.contains(&"中层"), "调用栈应含中层：{names:?}");
+                assert!(names.contains(&"顶层"), "调用栈应含顶层：{names:?}");
+            }
+            other => panic!("期望错误值，实际：{}", other.inspect()),
+        }
+    }
+
+    #[test]
+    fn 无错误返回类型时检查冒泡到顶层() {
+        let err = run(
+            "函数 坏() -> 错误\n\
+                 返回 错误(\"炸了\")\n\
+             结束\n\
+             函数 上层() -> 整数\n\
+                 变量 x = 检查 坏()\n\
+                 返回 x\n\
+             结束\n\
+             上层()",
+        )
+        .unwrap_err();
+        assert!(err.contains("未捕获的检查错误"), "实际：{err}");
+        assert!(err.contains("炸了"), "实际：{err}");
+    }
+
+    #[test]
+    fn 检查赋值语句同样冒泡() {
+        let err = run(
+            "函数 坏() -> 错误\n\
+                 返回 错误(\"赋值路径\")\n\
+             结束\n\
+             函数 上层() -> 整数\n\
+                 变量 x = 0\n\
+                 x = 检查 坏()\n\
+                 返回 x\n\
+             结束\n\
+             上层()",
+        )
+        .unwrap_err();
+        assert!(err.contains("赋值路径"), "实际：{err}");
+    }
+
 
     #[test]
     fn 段间有空白是调用后取字段() {
@@ -2283,5 +2751,76 @@ mod tests {
     #[test]
     fn 联合命名类型可自动包装() {
         check("定义 类型 编号 = 整数 或 字符串\n变量 编号 甲 = 7\n甲", "7");
+    }
+
+    #[test]
+    fn 参数类型不符时报错() {
+        let err = run("函数 加一(值 整数) -> 整数\n    返回 值 加 1\n结束\n加一(\"文本\")")
+            .unwrap_err();
+        assert!(err.contains("参数 值 类型不匹配"), "实际：{err}");
+    }
+
+    #[test]
+    fn 参数类型匹配时正常执行() {
+        check(
+            "函数 加一(值 整数) -> 整数\n    返回 值 加 1\n结束\n加一(41)",
+            "42",
+        );
+    }
+
+    #[test]
+    fn 返回值类型不符时报错() {
+        let err = run("函数 取值() -> 字符串\n    返回 42\n结束\n取值()").unwrap_err();
+        assert!(err.contains("返回值类型不匹配"), "实际：{err}");
+    }
+
+    #[test]
+    fn 返回值数量不符时报错() {
+        let err = run(
+            "函数 取值() -> (整数, 字符串)\n    返回 1\n结束\n取值()",
+        )
+        .unwrap_err();
+        assert!(err.contains("返回值数量不符"), "实际：{err}");
+    }
+
+    #[test]
+    fn 未声明返回类型时不约束() {
+        check("函数 随便()\n    返回 42\n结束\n随便()", "42");
+    }
+
+    #[test]
+    fn 默认参数也做类型校验() {
+        // 默认值类型正确时正常
+        check(
+            "函数 问候(名字 字符串 = \"凡\") -> 字符串\n    返回 名字\n结束\n问候()",
+            "凡",
+        );
+    }
+
+    #[test]
+    fn 多返回值按声明逐项校验() {
+        check(
+            "函数 拆分() -> (整数, 字符串)\n    返回 1, \"甲\"\n结束\n变量 a、b = 拆分()\na",
+            "1",
+        );
+        let err = run(
+            "函数 拆分() -> (整数, 字符串)\n    返回 1, 2\n结束\n拆分()",
+        )
+        .unwrap_err();
+        assert!(err.contains("第 2 个返回值"), "实际：{err}");
+    }
+
+    #[test]
+    fn 方法参数同样受类型约束() {
+        let err = run(
+            "定义 模型 计数器
+结束
+定义 计数器 的 方法 增加(步长 整数) -> 整数
+    返回 步长
+结束
+计数器().增加(\"x\")",
+        )
+        .unwrap_err();
+        assert!(err.contains("参数 步长 类型不匹配"), "实际：{err}");
     }
 }

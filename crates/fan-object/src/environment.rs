@@ -397,16 +397,16 @@ fn check_named_or_interface_type(
         ));
     }
 
-    // 接口：按方法集做结构化满足检查。
+    // 接口：按方法集做结构化满足检查（含参数/返回类型签名比对）。
     if let Some(iface) = rt_ref.lookup_interface(name) {
-        let missing = interface_missing_methods(&iface, value);
-        return match missing {
+        return match crate::interface_missing_method(&iface, value, env) {
             None => Ok(()),
-            Some(method) => Err(format!(
-                "类型不匹配：声明为 {}，实际为 {}（缺少方法 {}）",
+            Some((method, reason)) => Err(format!(
+                "类型不匹配：声明为 {}，实际为 {}（方法 {} {}）",
                 name,
                 value.kind(),
-                method
+                method,
+                reason
             )),
         };
     }
@@ -416,30 +416,6 @@ fn check_named_or_interface_type(
         name,
         value.kind()
     ))
-}
-
-/// 返回值缺少的第一个接口方法名；全部满足时返回 `None`。
-fn interface_missing_methods(iface: &crate::Interface, value: &Object) -> Option<String> {
-    if iface.methods.is_empty() {
-        return None;
-    }
-    for name in iface.methods.keys() {
-        if lookup_method(value, name).is_none() {
-            return Some(name.clone());
-        }
-    }
-    None
-}
-
-/// 在值上查找方法：模型实例查自身方法与内建模型方法。
-fn lookup_method(value: &Object, name: &str) -> Option<Rc<crate::Function>> {
-    match value {
-        Object::Instance(inst) => inst.class.method(name),
-        Object::Str(_) | Object::Array(_) | Object::Dict(_) | Object::Int(_) | Object::Float(_) => {
-            None // 原生类型方法由 fan-eval 的注册表处理
-        }
-        _ => None,
-    }
 }
 
 /// 按声明类型转换值：字节会把 0–255 的整数规约成字节；
@@ -846,7 +822,7 @@ mod tests {
         // 缺少方法的实例不满足
         let empty = Object::Instance(Rc::new(crate::Instance::new(Rc::new(Class::new("石头")))));
         let err = check_decl_type(&DeclType::named("说话者"), &empty, &e);
-        assert!(err.unwrap_err().contains("缺少方法 说话"));
+        assert!(err.unwrap_err().contains("方法 说话 缺少"));
     }
 
     #[test]

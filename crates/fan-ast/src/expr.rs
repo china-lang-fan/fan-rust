@@ -367,6 +367,9 @@ pub struct CallExpr {
     pub pos: Position,
     pub callee: Box<Expr>,
     pub args: Vec<Expr>,
+    /// 分段（mixfix）函数调用的根段名，由 parser 在识别到多段调用时填充；
+    /// 普通调用为 `None`。
+    pub mixfix_root: Option<String>,
 }
 
 impl fmt::Display for CallExpr {
@@ -935,6 +938,7 @@ mod tests {
             pos: pos(),
             callee: Box::new(ident("打印")),
             args: vec![int(1), int(2)],
+            mixfix_root: None,
         });
         assert_eq!(e.to_string(), "打印(1, 2)");
     }

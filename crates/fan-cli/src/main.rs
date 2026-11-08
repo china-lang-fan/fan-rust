@@ -3,14 +3,17 @@
 //! ```text
 //! fan 运行 <脚本.凡> [参数...]   执行脚本
 //! fan 测试 [目录或文件]          执行 *_测试.凡 中的测试函数
+//! fan 交互                      进入交互式求值（REPL）
+//! fan lsp                       启动语言服务器（占位，批次4落地）
 //! fan 版本                      输出版本
 //! fan 帮助                      输出用法
 //! ```
 
 use fan_eval::{default_modules_dirs, Interpreter};
-use fan_object::Runtime;
+use fan_object::{Object, Runtime};
 use fan_parser::parse_program;
 use std::cell::RefCell;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -44,6 +47,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let target = args.get(1).map(|s| s.as_str()).unwrap_or(".");
             run_tests(target)
         }
+        "交互" | "repl" => run_repl(BufReader::new(std::io::stdin()), std::io::stdout()),
+        "lsp" => run_lsp(),
         "版本" | "version" | "-v" | "--version" => {
             println!("凡语言 {}（命令名：fan）", VERSION);
             Ok(())
@@ -64,11 +69,13 @@ fn usage_text() -> String {
     format!(
         "凡语言 {}（命令名：fan）\n\
          \n\
-         用法：\n\
-         \x20 fan 运行 <脚本.凡> [参数...]   执行脚本\n\
-         \x20 fan 测试 [目录或文件]          执行 *_测试.凡 中的测试函数\n\
-         \x20 fan 版本                      输出版本\n\
-         \x20 fan 帮助                      输出本帮助\n\
+          用法：\n\
+          \x20 fan 运行 <脚本.凡> [参数...]   执行脚本\n\
+          \x20 fan 测试 [目录或文件]          执行 *_测试.凡 中的测试函数\n\
+          \x20 fan 交互                      进入交互式求值（REPL）\n\
+          \x20 fan lsp                       启动语言服务器（占位，批次4落地）\n\
+          \x20 fan 版本                      输出版本\n\
+          \x20 fan 帮助                      输出本帮助\n\
          \n\
          模块搜索目录：脚本所在目录 → 环境变量 FAN_SDK → 可执行文件旁 → 系统安装位置。\n",
         VERSION
@@ -126,6 +133,47 @@ fn run_tests(target: &str) -> Result<(), String> {
         return Err("测试失败".to_string());
     }
     Ok(())
+}
+
+/// 交互式求值：逐行读取、在同一解释器上累积状态。
+///
+/// 与 Go 版 `runREPL` 对齐：空行跳过，`:退出`/`:quit`/`:q` 结束，
+/// 语法或运行错误只打印不中断会话。为便于测试，输入/输出均以参数注入。
+fn run_repl<I: BufRead, O: Write>(input: I, mut output: O) -> Result<(), String> {
+    let mut interp = Interpreter::new();
+    let reader = input;
+    writeln!(output, "凡语言 REPL，输入 :退出 结束").map_err(|e| e.to_string())?;
+    for line in reader.lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if matches!(trimmed, ":退出" | ":quit" | ":q") {
+            return Ok(());
+        }
+        let (program, errors) = parse_program(trimmed);
+        if !errors.is_empty() {
+            for e in &errors.0 {
+                writeln!(output, "语法错误：{e}").map_err(|e| e.to_string())?;
+            }
+            continue;
+        }
+        match interp.run(&program) {
+            Ok(Object::Nil) => {}
+            Ok(v) => writeln!(output, "{}", Object::format(&v)).map_err(|e| e.to_string())?,
+            Err(e) => writeln!(output, "运行错误：{}", e.display()).map_err(|e| e.to_string())?,
+        }
+    }
+    Ok(())
+}
+
+/// LSP 子命令占位。
+///
+/// 完整的 JSON-RPC/stdio 语言服务器属批次 4（新建 fan-lsp crate）；
+/// 这里先固定命令入口，避免编辑器接入时再改启动契约。
+fn run_lsp() -> Result<(), String> {
+    Err("LSP 语言服务器将在批次 4 落地（fan-lsp crate）".to_string())
 }
 
 fn abs_path(path: &str) -> String {
@@ -241,5 +289,43 @@ mod tests {
         let err = run(args(&["测试", &dir.to_string_lossy()])).unwrap_err();
         assert_eq!(err, "测试失败");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repl逐行求值并保持状态() {
+        let input = "变量 甲 = 3\n甲 加 4\n:退出\n".as_bytes();
+        let mut out = Vec::new();
+        run_repl(input, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("凡语言 REPL"), "实际：{text}");
+        assert!(text.contains("7"), "应输出表达式结果 7：{text}");
+        // 状态在行间保持：后续表达式能读到先前声明的变量
+        assert!(text.contains("3"), "应保留先前变量值：{text}");
+    }
+
+    #[test]
+    fn repl错误不中断后续会话() {
+        let input = "变量 = = =\n1 加 2\n:q\n".as_bytes();
+        let mut out = Vec::new();
+        run_repl(input, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("语法错误"), "实际：{text}");
+        assert!(text.contains("3"), "错误后仍应继续求值：{text}");
+    }
+
+    #[test]
+    fn repl运行错误可恢复() {
+        let input = "打印(未定义名字)\n2 乘 3\n:quit\n".as_bytes();
+        let mut out = Vec::new();
+        run_repl(input, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("运行错误"), "实际：{text}");
+        assert!(text.contains("6"), "运行错误后应继续：{text}");
+    }
+
+    #[test]
+    fn lsp子命令返回未落地提示() {
+        let err = run(args(&["lsp"])).unwrap_err();
+        assert!(err.contains("批次 4"), "实际：{err}");
     }
 }

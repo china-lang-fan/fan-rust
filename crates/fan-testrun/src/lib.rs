@@ -266,6 +266,7 @@ fn call_test(interp: &mut Interpreter, case: &TestCase) -> Result<Object, FanErr
             name: case.name.clone(),
         })),
         args: Vec::new(),
+        mixfix_root: None,
     });
     let program = Program::new(vec![Stmt::Expr(fan_ast::ExpressionStmt {
         pos,

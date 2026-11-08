@@ -52,6 +52,11 @@ pub struct Runtime {
     /// 凡代码用 `定义 字符串 的 方法 截取(…)` 声明，宿主类型本身没有类对象，
     /// 故单独建表。
     pub primitive_methods: HashMap<String, HashMap<String, Rc<Function>>>,
+    /// 分段（mixfix）函数注册表：根段名 → 运行时签名 → 实现。
+    ///
+    /// 同一根段名下允许按参数类型重载，签名由调用实参的运行时类型重建，
+    /// 与 Go 版 `mixfixFunctionRegistry` 一致。
+    pub mixfix_functions: HashMap<String, HashMap<String, Rc<Function>>>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -88,6 +93,7 @@ impl Runtime {
             named_types: HashMap::new(),
             native_functions: HashMap::new(),
             primitive_methods: HashMap::new(),
+            mixfix_functions: HashMap::new(),
         }
     }
 
@@ -208,6 +214,35 @@ impl Runtime {
             .unwrap_or_default();
         names.sort();
         names
+    }
+
+    /// 登记一个分段函数。`root` 为根段名，`signature` 为声明期类型签名。
+    /// 同一签名重复登记时报错（与 Go 版“重复的分段函数签名”一致）。
+    pub fn register_mixfix(
+        &mut self,
+        root: &str,
+        signature: &str,
+        func: Rc<Function>,
+    ) -> Result<(), String> {
+        let table = self.mixfix_functions.entry(root.to_string()).or_default();
+        if table.contains_key(signature) {
+            return Err(format!("重复的分段函数签名：{signature}"));
+        }
+        table.insert(signature.to_string(), func);
+        Ok(())
+    }
+
+    /// 判断根段名是否登记过分段函数。
+    pub fn has_mixfix_root(&self, root: &str) -> bool {
+        self.mixfix_functions.contains_key(root)
+    }
+
+    /// 按根段名与运行时签名查找分段函数。
+    pub fn lookup_mixfix(&self, root: &str, signature: &str) -> Option<Rc<Function>> {
+        self.mixfix_functions
+            .get(root)?
+            .get(signature)
+            .cloned()
     }
 
     /// 在指定环境内查找模型（内建模型优先，其次是环境中的模型值）。

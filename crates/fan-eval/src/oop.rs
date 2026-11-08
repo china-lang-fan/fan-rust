@@ -447,13 +447,37 @@ impl Interpreter {
     // ------------------------------------------------------------ 接口
 
     /// 求值 `接口 X … 结束`。
+    ///
+    /// 先把接口（含嵌入名）原样注册到运行实例，再展平嵌入接口：
+    /// 预先注册是为了支持前向引用与相互可见，展平时把嵌入方法并入本接口，
+    /// 带环检测，同名方法按签名比对，冲突报错。与 Go 版 `registerInterface` 一致。
     pub fn eval_interface_stmt(&mut self, stmt: &InterfaceStmt) -> EvalResult {
         let mut iface = Interface::new(stmt.name.clone());
         iface.visibility = stmt.visibility;
         for m in &stmt.methods {
+            if iface.methods.contains_key(&m.name) {
+                return Err(FanError::at(
+                    format!("接口 {} 的方法 {} 重复声明", stmt.name, m.name),
+                    m.pos,
+                ));
+            }
             iface.methods.insert(m.name.clone(), m.clone());
         }
         iface.embeds = stmt.embeds.clone();
+
+        // 先注册，使后续展平可按名找到（含同文件中定义在前向位置的接口）。
+        {
+            let env = self.env.clone();
+            env.borrow()
+                .runtime()
+                .borrow_mut()
+                .register_interface(Rc::new(iface.clone()));
+        }
+
+        self.flatten_interface(&mut iface, &mut Vec::new())
+            .map_err(|reason| FanError::at(reason, stmt.pos))?;
+
+        // 展平后用完整方法集覆盖注册。
         let env = self.env.clone();
         env.borrow()
             .runtime()
@@ -469,6 +493,58 @@ impl Interpreter {
             )
             .map_err(|e| FanError::at(e, stmt.pos))?;
         value(Object::Nil)
+    }
+
+    /// 递归展平接口的嵌入方法集。
+    ///
+    /// `visiting` 是当前展开链上的接口名，用于检测循环嵌入；
+    /// 同名但签名不同的方法报错，签名一致（含都未标注）则合并。
+    fn flatten_interface(
+        &self,
+        iface: &mut Interface,
+        visiting: &mut Vec<String>,
+    ) -> Result<(), String> {
+        let embed_names = iface.embeds.clone();
+        for embed_name in &embed_names {
+            if visiting.iter().any(|n| n == embed_name) {
+                return Err(format!("检测到接口循环嵌入：{embed_name}"));
+            }
+            let embed = {
+                let env = self.env.borrow();
+                let rt = env.runtime();
+                let rt_ref = rt.borrow();
+                match rt_ref.lookup_interface(embed_name) {
+                    Some(embed) => embed,
+                    None => {
+                        return Err(format!(
+                            "接口 {} 嵌入了未定义的接口 {}",
+                            iface.name, embed_name
+                        ))
+                    }
+                }
+            };
+
+            visiting.push(embed_name.clone());
+            // 先展平被嵌入接口自身的嵌入，保证拿到完整方法集。
+            let mut embed_flat = (*embed).clone();
+            self.flatten_interface(&mut embed_flat, visiting)?;
+            visiting.pop();
+
+            for (name, method) in embed_flat.methods {
+                if let Some(existing) = iface.methods.get(&name) {
+                    let conflict = fan_object::interface_sig_conflict(existing, &method);
+                    if !conflict.is_empty() {
+                        return Err(format!(
+                            "接口 {} 中方法 {} 的签名冲突（{}）",
+                            iface.name, name, conflict
+                        ));
+                    }
+                    continue;
+                }
+                iface.methods.insert(name, method);
+            }
+        }
+        Ok(())
     }
 
     // ------------------------------------------------------------ 类型运算
@@ -576,7 +652,7 @@ pub fn value_is_type(value: &Object, type_name: &str, env: &Environment) -> bool
             return true;
         }
         return match env.runtime().borrow().lookup_interface(type_name) {
-            Some(iface) => interface_missing_method(&iface, value).is_none(),
+            Some(iface) => interface_missing_method(&iface, value, env).is_none(),
             None => false,
         };
     }
@@ -604,24 +680,18 @@ pub fn value_is_type(value: &Object, type_name: &str, env: &Environment) -> bool
     }
     let iface = rt.borrow().lookup_interface(type_name);
     match iface {
-        Some(iface) => interface_missing_method(&iface, value).is_none(),
+        Some(iface) => interface_missing_method(&iface, value, env).is_none(),
         None => false,
     }
 }
 
-/// 返回值缺失的第一个接口方法名；全部满足返回 `None`。
-pub fn interface_missing_method(iface: &Interface, value: &Object) -> Option<String> {
-    if iface.methods.is_empty() {
-        return None;
-    }
-    match value.unwrap_named() {
-        Object::Instance(inst) => iface
-            .methods
-            .keys()
-            .find(|name| inst.class.lookup_method(name).is_none())
-            .cloned(),
-        _ => iface.methods.keys().next().cloned(),
-    }
+/// 返回第一个不满足的接口方法名及原因；全部满足返回 `None`。
+pub fn interface_missing_method(
+    iface: &Interface,
+    value: &Object,
+    env: &Environment,
+) -> Option<(String, String)> {
+    fan_object::interface_missing_method(iface, value, env)
 }
 
 /// 把值包装为命名类型；底层类型不满足时失败。
@@ -973,9 +1043,10 @@ mod tests {
         );
         let empty_cls = Rc::new(Class::new("石头"));
         let inst = Object::Instance(new_zero_instance(&empty_cls));
+        let env = Environment::new();
         assert_eq!(
-            interface_missing_method(&iface, &inst),
-            Some("说话".to_string())
+            interface_missing_method(&iface, &inst, &env),
+            Some(("说话".to_string(), "缺少".to_string()))
         );
     }
 
@@ -995,7 +1066,8 @@ mod tests {
             },
         );
         let inst = Object::Instance(new_zero_instance(&cls));
-        assert_eq!(interface_missing_method(&iface, &inst), None);
+        let env = Environment::new();
+        assert_eq!(interface_missing_method(&iface, &inst, &env), None);
     }
 
     #[test]
@@ -1319,6 +1391,125 @@ mod tests {
 结束
 让说话(狗{})",
             "汪",
+        );
+    }
+
+    #[test]
+    fn 嵌入接口方法被展平() {
+        check(
+            "接口 命名者
+    方法 取名() -> 字符串
+结束
+接口 说话者
+    嵌入 命名者
+    方法 说话() -> 字符串
+结束
+定义 模型 鹦鹉
+结束
+定义 鹦鹉 的 方法 取名() -> 字符串
+    返回 \"小绿\"
+结束
+定义 鹦鹉 的 方法 说话() -> 字符串
+    返回 \"你好\"
+结束
+变量 甲 = 鹦鹉{}
+甲 是 说话者",
+            "真",
+        );
+    }
+
+    #[test]
+    fn 展平后只实现部分嵌入方法则不满足() {
+        check(
+            "接口 命名者
+    方法 取名() -> 字符串
+结束
+接口 说话者
+    嵌入 命名者
+    方法 说话() -> 字符串
+结束
+定义 模型 哑巴
+结束
+定义 哑巴 的 方法 说话() -> 字符串
+    返回 \"嗯\"
+结束
+变量 甲 = 哑巴{}
+甲 是 说话者",
+            "假",
+        );
+    }
+
+    #[test]
+    fn 接口循环嵌入报错() {
+        // 先定义 乙（嵌入稍后定义的 丙 会先报未定义），因此用自环与互环两种合法顺序：
+        // 互环：甲 先定义并嵌入 乙；乙 后定义且嵌入 甲（甲此时已注册）。
+        let err = run(
+            "接口 甲
+    嵌入 乙
+结束
+接口 乙
+    嵌入 甲
+结束",
+        )
+        .unwrap_err();
+        // 甲 在前向引用 乙：要求嵌入接口先定义，故报未定义而非环。
+        assert!(
+            err.contains("循环嵌入") || err.contains("未定义的接口"),
+            "实际错误：{err}"
+        );
+
+        // 自环：接口嵌入自身，定义时自身已注册，应明确报循环嵌入。
+        let err_self = run(
+            "接口 甲
+    嵌入 甲
+结束",
+        )
+        .unwrap_err();
+        assert!(err_self.contains("循环嵌入"), "实际错误：{err_self}");
+    }
+
+    #[test]
+    fn 嵌入未定义接口报错() {
+        let err = run(
+            "接口 甲
+    嵌入 不存在
+结束",
+        )
+        .unwrap_err();
+        assert!(err.contains("未定义的接口"), "实际错误：{err}");
+    }
+
+    #[test]
+    fn 嵌入同名方法签名冲突报错() {
+        let err = run(
+            "接口 甲
+    方法 处理(内容 字符串) -> 字符串
+结束
+接口 乙
+    嵌入 甲
+    方法 处理(内容 整数) -> 字符串
+结束",
+        )
+        .unwrap_err();
+        assert!(err.contains("签名冲突"), "实际错误：{err}");
+    }
+
+    #[test]
+    fn 嵌入同名方法签名一致时合并成功() {
+        check(
+            "接口 甲
+    方法 处理(内容 字符串) -> 字符串
+结束
+接口 乙
+    嵌入 甲
+结束
+定义 模型 实现者
+结束
+定义 实现者 的 方法 处理(内容 字符串) -> 字符串
+    返回 内容
+结束
+实现者() 是 乙",
+            "真",
         );
     }
 }

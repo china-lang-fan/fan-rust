@@ -1755,6 +1755,7 @@ impl Parser {
                 pos,
                 callee: Box::new(ast::Expr::Ident(callee)),
                 args,
+                mixfix_root: None,
             })),
             _ => {
                 let t = self.cur.clone();
@@ -1896,6 +1897,7 @@ impl Parser {
                         pos,
                         callee: Box::new(left),
                         args,
+                        mixfix_root: None,
                     });
                     left = self.parse_segmented_tail(call, pos)?;
                 }
@@ -2068,6 +2070,7 @@ impl Parser {
                     pos,
                     callee: Box::new(node),
                     args,
+                    mixfix_root: None,
                 }),
                 pos,
             )?;
@@ -2090,11 +2093,12 @@ impl Parser {
             return Some(call);
         };
         // 首段名来自被调用者：裸名字（`修改(...)`）或成员名（`工具.求(...)`）
-        let mut full = match node.callee.as_ref() {
+        let root_name = match node.callee.as_ref() {
             ast::Expr::Ident(i) => i.name.clone(),
             ast::Expr::Member(m) => m.name.clone(),
             _ => return Some(ast::Expr::Call(node)),
         };
+        let mut full = root_name.clone();
         let mut extra_args: Vec<ast::Expr> = Vec::new();
         let mut segments = 1usize;
 
@@ -2132,12 +2136,14 @@ impl Parser {
         if segments == 1 {
             return Some(ast::Expr::Call(node));
         }
+        let root = root_name.clone();
         node.args.extend(extra_args);
         match node.callee.as_mut() {
             ast::Expr::Ident(i) => i.name = full,
             ast::Expr::Member(m) => m.name = full,
             _ => unreachable!("首段名只可能来自标识符或成员"),
         }
+        node.mixfix_root = Some(root);
         let _ = (pos, segments);
         Some(ast::Expr::Call(node))
     }

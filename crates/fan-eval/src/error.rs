@@ -73,6 +73,8 @@ pub enum Flow {
     Continue,
     /// `抛出`，携带被抛出的值。
     Throw(fan_object::Object),
+    /// `检查 调用` 命中的错误，携带错误值与检查位置，立即向当前函数边界冒泡。
+    Check(fan_object::Object, Position),
 }
 
 impl Flow {
@@ -84,6 +86,7 @@ impl Flow {
             Flow::Break => Err(FanError::new("跳出 不能出现在循环外")),
             Flow::Continue => Err(FanError::new("继续 不能出现在循环外")),
             Flow::Throw(v) => Err(FanError::new(format!("未捕获的抛出：{}", v.inspect()))),
+            Flow::Check(v, _) => Err(FanError::new(format!("未捕获的检查错误：{}", v.inspect()))),
         }
     }
 

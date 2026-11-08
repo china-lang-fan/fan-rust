@@ -22,6 +22,7 @@
 
 pub mod collection;
 pub mod environment;
+pub mod interface;
 pub mod kind;
 pub mod object;
 pub mod runtime;
@@ -35,6 +36,7 @@ pub use environment::{
     check_decl_type, check_single_decl_type, coerce_decl_type, format_decl_type, Binding,
     Environment,
 };
+pub use interface::{interface_missing_method, interface_sig_conflict};
 pub use kind::{kind_display_name, primitive_kind_from_name, runtime_type_name, Kind};
 pub use object::{Named, Object};
 pub use runtime::{
