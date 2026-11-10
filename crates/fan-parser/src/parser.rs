@@ -23,6 +23,9 @@ pub struct Parser {
     paren_depth: usize,
     /// 是否允许“无括号调用”：此标志只在表达式语句内打开。
     implicit_call_ok: bool,
+    /// 块嵌套深度：0 表示模块顶层。扩展方法（`定义 类型 的 方法 …`）
+    /// 只允许在模块顶层声明，块内出现即报错。
+    block_depth: usize,
 }
 
 impl Parser {
@@ -41,6 +44,7 @@ impl Parser {
             errors: Errors::default(),
             paren_depth: 0,
             implicit_call_ok: false,
+            block_depth: 0,
         }
     }
 
@@ -220,6 +224,7 @@ impl Parser {
             pos,
             statements: Vec::new(),
         };
+        self.block_depth += 1;
         loop {
             self.skip_statement_end();
             match self.cur.type_ {
@@ -227,15 +232,22 @@ impl Parser {
                 | TokenType::Else
                 | TokenType::ElseIf
                 | TokenType::Until
-                | TokenType::Eof => return Some(block),
+                | TokenType::Eof => {
+                    self.block_depth -= 1;
+                    return Some(block);
+                }
                 TokenType::Illegal => {
                     let t = self.cur.clone();
                     self.add_error(&t, format_args!("非法字符：{}", t.literal));
+                    self.block_depth -= 1;
                     return None;
                 }
                 _ => {}
             }
-            let stmt = self.parse_statement()?;
+            let Some(stmt) = self.parse_statement() else {
+                self.block_depth -= 1;
+                return None;
+            };
             block.statements.push(stmt);
             if !matches!(
                 self.cur.type_,
@@ -248,6 +260,7 @@ impl Parser {
             ) {
                 let t = self.cur.clone();
                 self.add_error(&t, format_args!("语句后应换行，实际是 {:?}", t.literal));
+                self.block_depth -= 1;
                 return None;
             }
         }
@@ -1205,25 +1218,32 @@ impl Parser {
             pos,
             statements: Vec::new(),
         };
+        self.block_depth += 1;
         loop {
             match self.cur.type_ {
                 TokenType::End => {
                     self.next();
+                    self.block_depth -= 1;
                     return Some(block);
                 }
                 TokenType::Eof => {
                     let t = self.cur.clone();
                     self.add_error(&t, "函数缺少 结束");
+                    self.block_depth -= 1;
                     return None;
                 }
                 TokenType::Illegal => {
                     let t = self.cur.clone();
                     self.add_error(&t, format_args!("非法字符：{}", t.literal));
+                    self.block_depth -= 1;
                     return None;
                 }
                 _ => {}
             }
-            let stmt = self.parse_statement()?;
+            let Some(stmt) = self.parse_statement() else {
+                self.block_depth -= 1;
+                return None;
+            };
             block.statements.push(stmt);
             if !matches!(
                 self.cur.type_,
@@ -1231,6 +1251,7 @@ impl Parser {
             ) {
                 let t = self.cur.clone();
                 self.add_error(&t, format_args!("语句后应换行，实际是 {:?}", t.literal));
+                self.block_depth -= 1;
                 return None;
             }
             self.skip_statement_end();
@@ -1529,6 +1550,14 @@ impl Parser {
 
     fn parse_method_definition(&mut self) -> Option<Stmt> {
         let pos = self.cur_pos();
+        if self.block_depth > 0 {
+            let t = self.cur.clone();
+            self.add_error(
+                &t,
+                "扩展方法只能在模块顶层声明（定义 类型 的 方法 …），不允许写在函数/分支/循环等块内",
+            );
+            return None;
+        }
         let mut receiver_name = "自己".to_string();
         let mut class_name = self.cur.literal.clone();
         let mut primitive = is_type_token(self.cur.type_);
@@ -3776,6 +3805,57 @@ mod tests {
             Stmt::MethodDef(m) => assert_eq!(m.visibility, Visibility::Public),
             other => panic!("应为方法定义，实际 {other:?}"),
         }
+    }
+
+    #[test]
+    fn 扩展方法允许在顶层声明() {
+        let prog = parse_ok("定义 字符串 的 方法 喊() -> 字符串\n    返回 自己\n结束");
+        assert!(matches!(&prog.statements[0], Stmt::MethodDef(_)));
+    }
+
+    #[test]
+    fn 扩展方法不能声明在函数体内() {
+        let errs = parse_err(
+            "函数 外层()\n    定义 字符串 的 方法 喊() -> 字符串\n        返回 自己\n    结束\n结束",
+        );
+        assert!(errs
+            .first_message()
+            .unwrap()
+            .contains("扩展方法只能在模块顶层声明"));
+    }
+
+    #[test]
+    fn 扩展方法不能声明在分支块内() {
+        let errs = parse_err(
+            "如果 真 那么\n    定义 整数 的 方法 加倍() -> 整数\n        返回 自己\n    结束\n结束",
+        );
+        assert!(errs
+            .first_message()
+            .unwrap()
+            .contains("扩展方法只能在模块顶层声明"));
+    }
+
+    #[test]
+    fn 扩展方法不能声明在循环块内() {
+        let errs = parse_err(
+            "遍历 [1, 2] 中的 项\n    定义 整数 的 方法 加倍() -> 整数\n        返回 自己\n    结束\n结束",
+        );
+        assert!(errs
+            .first_message()
+            .unwrap()
+            .contains("扩展方法只能在模块顶层声明"));
+    }
+
+    #[test]
+    fn 块内声明拦截后顶层扩展方法仍可解析() {
+        // 验证块深度在解析失败后正确回退，不污染后续顶层声明
+        let prog = parse_ok(
+            "定义 字符串 的 方法 喊() -> 字符串\n    返回 自己\n结束\n\
+             定义 整数 的 方法 加倍() -> 整数\n    返回 自己\n结束",
+        );
+        assert_eq!(prog.statements.len(), 2);
+        assert!(matches!(&prog.statements[0], Stmt::MethodDef(_)));
+        assert!(matches!(&prog.statements[1], Stmt::MethodDef(_)));
     }
 
     #[test]
