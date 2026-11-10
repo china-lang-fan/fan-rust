@@ -1378,11 +1378,29 @@ impl Parser {
             let t = self.cur.clone();
             self.add_error(
                 &t,
-                format_args!("类型 {name} 需要底层类型（基本类型、模型/接口名或其联合）"),
+                format_args!("类型 {name} 需要底层类型（基本类型或其联合）"),
             );
             return None;
         }
         let base_type = self.parse_type_union();
+        // 类型别名的底层只允许内置基础类型或其联合；模型名、接口名、其他
+        // 自定义类型名一律拒绝，避免别名与模型/接口的名义类型产生歧义。
+        let illegal: Vec<&str> = base_type
+            .members()
+            .into_iter()
+            .filter(|m| !DeclType::named(*m).is_builtin())
+            .collect();
+        if !illegal.is_empty() {
+            let t = self.cur.clone();
+            self.add_error(
+                &t,
+                format_args!(
+                    "类型 {name} 的底层类型只能是基本类型或其联合，不允许模型/接口名或其他自定义类型：{}",
+                    illegal.join("、")
+                ),
+            );
+            return None;
+        }
         if self.cur.type_ != TokenType::Newline && self.cur.type_ != TokenType::Eof {
             let t = self.cur.clone();
             self.add_error(&t, "类型声明后应换行");
@@ -3782,6 +3800,38 @@ mod tests {
             }
             other => panic!("应为类型定义，实际 {other:?}"),
         }
+    }
+
+    #[test]
+    fn 类型别名底层允许基础类型联合() {
+        let prog = parse_ok("定义 类型 编号 = 整数 或 字符串");
+        match &prog.statements[0] {
+            Stmt::TypeDef(t) => {
+                assert_eq!(t.name, "编号");
+                assert!(t.base_type.is_union());
+                assert_eq!(t.base_type.members(), vec!["整数", "字符串"]);
+            }
+            other => panic!("应为类型定义，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 类型别名底层拒绝模型名() {
+        let errs = parse_err("模型 用户\n    属性 字符串 名\n结束\n定义 类型 编号 = 用户");
+        assert!(errs
+            .first_message()
+            .unwrap()
+            .contains("底层类型只能是基本类型或其联合"));
+    }
+
+    #[test]
+    fn 类型别名底层拒绝联合中的模型名() {
+        let errs = parse_err("模型 用户\n    属性 字符串 名\n结束\n定义 类型 编号 = 整数 或 用户");
+        assert!(errs
+            .first_message()
+            .unwrap()
+            .contains("不允许模型/接口名或其他自定义类型"));
+        assert!(errs.first_message().unwrap().contains("用户"));
     }
 
     #[test]
