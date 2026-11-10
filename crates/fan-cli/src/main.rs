@@ -225,9 +225,11 @@ mod tests {
         let dir = temp_dir("args");
         // 参数写入文件以便断言（打印行 输出到标准输出，测试不便捕获）
         let out = dir.join("参数.txt");
-        // 相对路径按进程工作目录解析，故这里写绝对路径
+        // 直接用 @内建 绑定原生函数，避免依赖共享 fan-sdk 的 .凡 模块
         let source = format!(
-            "导入 \"进程\" 作为 进程模块\n导入 \"文件\" 作为 文件模块\n文件模块.写入(\"{}\", 进程模块.参数()[0])\n",
+            "@内建(\"processArgs\")\n函数 取参数(任意... 占位) -> 数组\n    返回 空\n结束\n\
+             @内建(\"writeFile\")\n函数 写文件(任意... 占位)\n    返回 空\n结束\n\
+             写文件(\"{}\", 取参数()[0])\n",
             out.to_string_lossy().replace('\\', "/")
         );
         let path = write(&dir, "参数.凡", &source);

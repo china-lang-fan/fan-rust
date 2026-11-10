@@ -613,14 +613,17 @@ impl fmt::Display for FunctionLit {
                 f.write_str(", ")?;
             }
             if p.variadic {
-                if !p.type_.is_any() {
-                    write!(f, "{} ", p.type_)?;
+                if p.type_.is_any() {
+                    write!(f, "任意... {}", p.name)?;
+                } else {
+                    write!(f, "{}... {}", p.type_, p.name)?;
                 }
-                write!(f, "...{}", p.name)?;
             } else {
-                f.write_str(&p.name)?;
-                if !p.type_.is_any() {
-                    write!(f, " {}", p.type_)?;
+                if p.type_.is_any() {
+                    f.write_str("任意 ")?;
+                    f.write_str(&p.name)?;
+                } else {
+                    write!(f, "{} {}", p.type_, p.name)?;
                 }
                 if let Some(d) = &p.default {
                     write!(f, " = {}", d)?;
@@ -1042,7 +1045,7 @@ mod tests {
             return_types: vec![DeclType::named("整数")],
             tags: vec![],
         };
-        assert_eq!(f.to_string(), "函数 求和(甲 整数, ...乙) 返回 整数  结束");
+        assert_eq!(f.to_string(), "函数 求和(整数 甲, 任意... 乙) 返回 整数  结束");
     }
 
     #[test]
@@ -1090,7 +1093,7 @@ mod tests {
             return_types: vec![],
             tags: vec![],
         };
-        assert_eq!(f.to_string(), "函数 问候(称呼 = \"你好\")  结束");
+        assert_eq!(f.to_string(), "函数 问候(任意 称呼 = \"你好\")  结束");
     }
 
     #[test]

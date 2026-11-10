@@ -1047,23 +1047,44 @@ impl Parser {
                 self.next();
                 return Some(params);
             }
-            if self.cur.type_ != TokenType::Ident && self.cur.type_ != TokenType::Self_ {
+            // 新语序：类型在前、名字在后，且类型必须显式声明。
+            if !is_type_position_token(self.cur.type_) {
                 let t = self.cur.clone();
-                self.add_error(&t, "参数名应为标识符");
+                if t.type_ == TokenType::Ident {
+                    self.add_error(
+                        &t,
+                        "参数须写作「类型 名字」（类型在前、名字在后），且必须显式声明类型",
+                    );
+                } else {
+                    self.add_error(&t, "参数应以类型名开头（类型在前、名字在后）");
+                }
                 self.paren_depth -= 1;
                 return None;
             }
-            let name = self.cur.literal.clone();
-            self.next();
+            let dt = self.parse_type_union();
+            if dt.is_union() {
+                let t = self.cur.clone();
+                self.add_error(
+                    &t,
+                    "参数不允许匿名联合类型，请先用「定义 类型」为联合起别名",
+                );
+                self.paren_depth -= 1;
+                return None;
+            }
+            // 可变参数：类型后紧跟 ...，再写名字，如 `整数... 数字们`。
             let mut variadic = false;
             if self.cur.type_ == TokenType::Ellipsis {
                 variadic = true;
                 self.next();
             }
-            let mut dt = DeclType::any();
-            if is_type_position_token(self.cur.type_) {
-                dt = self.parse_type_union();
+            if self.cur.type_ != TokenType::Ident && self.cur.type_ != TokenType::Self_ {
+                let t = self.cur.clone();
+                self.add_error(&t, "类型后应为参数名（标识符）");
+                self.paren_depth -= 1;
+                return None;
             }
+            let name = self.cur.literal.clone();
+            self.next();
             let mut default = None;
             if !variadic && self.cur.type_ == TokenType::Assign {
                 saw_default = true;
@@ -1075,6 +1096,12 @@ impl Parser {
                         return None;
                     }
                 };
+                if let Err(reason) = check_default_inferable(&dt, &d) {
+                    let t = self.cur.clone();
+                    self.add_error(&t, reason);
+                    self.paren_depth -= 1;
+                    return None;
+                }
                 default = Some(d);
             } else if saw_default && !variadic {
                 let t = self.cur.clone();
@@ -1252,7 +1279,7 @@ impl Parser {
                     self.add_error(&t, format_args!("非法字符：{}", t.literal));
                     return None;
                 }
-                TokenType::Var | TokenType::Public | TokenType::Private => {
+                TokenType::Property | TokenType::Public | TokenType::Private => {
                     let mut field_vis = Visibility::File;
                     if self.cur.type_ == TokenType::Public || self.cur.type_ == TokenType::Private {
                         field_vis = if self.cur.type_ == TokenType::Public {
@@ -1261,9 +1288,9 @@ impl Parser {
                             Visibility::Private
                         };
                         self.next();
-                        if self.cur.type_ != TokenType::Var {
+                        if self.cur.type_ != TokenType::Property {
                             let t = self.cur.clone();
-                            self.add_error(&t, "可见性修饰后应为 变量 字段声明");
+                            self.add_error(&t, "可见性修饰后应为 属性 字段声明");
                             return None;
                         }
                     }
@@ -1313,6 +1340,14 @@ impl Parser {
                         return None;
                     }
                     self.skip_statement_end();
+                }
+                TokenType::Var => {
+                    let t = self.cur.clone();
+                    self.add_error(
+                        &t,
+                        "模型体内字段须用 属性 声明（变量 关键字已移除，无兼容期）",
+                    );
+                    return None;
                 }
                 _ => {
                     let t = self.cur.clone();
@@ -2678,7 +2713,12 @@ impl Parser {
             TokenType::Class | TokenType::Ident => {
                 let name = self.cur.literal.clone();
                 self.next();
-                DeclType::named(name)
+                // `任意` 是显式的动态类型占位（与名称修饰规则一致），解析为未标注类型。
+                if name == "任意" {
+                    DeclType::any()
+                } else {
+                    DeclType::named(name)
+                }
             }
             _ => DeclType::any(),
         }
@@ -2798,6 +2838,48 @@ fn is_type_token(t: TokenType) -> bool {
 /// 判断记号能否作为类型位置上的一个类型名。
 fn is_type_position_token(t: TokenType) -> bool {
     is_type_token(t) || t == TokenType::Class || t == TokenType::Ident || t == TokenType::Nil
+}
+
+/// 默认参数值的静态类型推断与兼容性校验。
+///
+/// 规则：默认值必须能在解析期推断出确定类型，且与声明类型兼容，否则禁止定义。
+/// 目前可推断的仅限字面量（含一元负号的数值字面量）、空值与空容器；
+/// 涉及标识符、调用、运算等运行期才能确定类型的表达式一律拒绝。
+fn check_default_inferable(decl: &DeclType, default: &ast::Expr) -> Result<(), String> {
+    let inferred = infer_literal_type(default).ok_or_else(|| {
+        format!(
+            "参数默认值无法静态推断类型（声明为 {}），仅支持字面量、空值与空容器",
+            decl.0
+        )
+    })?;
+    // 空值可作为任意可空/引用位置的默认值，运行期再做强制检查。
+    if inferred == "空" {
+        return Ok(());
+    }
+    if inferred != decl.0 {
+        return Err(format!(
+            "参数默认值类型 {} 与声明类型 {} 不一致",
+            inferred, decl.0
+        ));
+    }
+    Ok(())
+}
+
+/// 推断字面量表达式的类型名；无法静态推断时返回 `None`。
+fn infer_literal_type(expr: &ast::Expr) -> Option<String> {
+    match expr {
+        ast::Expr::Integer(_) => Some("整数".to_string()),
+        ast::Expr::Float(_) => Some("小数".to_string()),
+        ast::Expr::Str(_) | ast::Expr::InterpStr(_) => Some("字符串".to_string()),
+        ast::Expr::Char(_) => Some("字符".to_string()),
+        ast::Expr::Bool(_) => Some("布尔".to_string()),
+        ast::Expr::Nil(_) => Some("空".to_string()),
+        ast::Expr::Array(a) if a.elements.is_empty() => Some("数组".to_string()),
+        ast::Expr::Dict(d) if d.pairs.is_empty() => Some("字典".to_string()),
+        // 一元负号作用于数值字面量仍是同一数值类型。
+        ast::Expr::Unary(u) if matches!(u.op.as_str(), "-") => infer_literal_type(&u.right),
+        _ => None,
+    }
 }
 
 fn is_union_sep_token(t: TokenType) -> bool {
@@ -3411,7 +3493,7 @@ mod tests {
 
     #[test]
     fn 函数定义含参数与返回类型() {
-        let prog = parse_ok("函数 求和(甲, 乙)\n    返回 甲 加 乙\n结束");
+        let prog = parse_ok("函数 求和(整数 甲, 整数 乙)\n    返回 甲 加 乙\n结束");
         match &prog.statements[0] {
             Stmt::VarDecl(v) => {
                 assert_eq!(v.name, "求和");
@@ -3426,7 +3508,7 @@ mod tests {
 
     #[test]
     fn 函数返回类型声明() {
-        let prog = parse_ok("定义 函数 求和(甲 整数, 乙 整数) -> 整数\n    返回 甲 加 乙\n结束");
+        let prog = parse_ok("定义 函数 求和(整数 甲, 整数 乙) -> 整数\n    返回 甲 加 乙\n结束");
         match &prog.statements[0] {
             Stmt::VarDecl(v) => match v.value.as_ref().unwrap() {
                 ast::Expr::Function(f) => {
@@ -3452,7 +3534,7 @@ mod tests {
 
     #[test]
     fn 函数默认参数与可变参数() {
-        let prog = parse_ok("函数 问候(名字, 称呼 = \"你好\")\n    打印(称呼)\n结束");
+        let prog = parse_ok("函数 问候(字符串 名字, 字符串 称呼 = \"你好\")\n    打印(称呼)\n结束");
         match &prog.statements[0] {
             Stmt::VarDecl(v) => match v.value.as_ref().unwrap() {
                 ast::Expr::Function(f) => assert!(f.params[1].default.is_some()),
@@ -3460,7 +3542,7 @@ mod tests {
             },
             other => panic!("应为变量声明，实际 {other:?}"),
         }
-        let prog = parse_ok("函数 求和(开头, 其余 ...整数)\n    返回 开头\n结束");
+        let prog = parse_ok("函数 求和(整数 开头, 整数... 其余)\n    返回 开头\n结束");
         match &prog.statements[0] {
             Stmt::VarDecl(v) => match v.value.as_ref().unwrap() {
                 ast::Expr::Function(f) => assert!(f.params[1].variadic),
@@ -3472,7 +3554,7 @@ mod tests {
 
     #[test]
     fn 可变参数后还有参数报错() {
-        let errs = parse_err("函数 甲(乙 ...整数, 丙)\n    返回 1\n结束");
+        let errs = parse_err("函数 甲(整数... 乙, 整数 丙)\n    返回 1\n结束");
         assert!(errs
             .first_message()
             .unwrap()
@@ -3481,8 +3563,117 @@ mod tests {
 
     #[test]
     fn 默认参数后不能再有普通参数() {
-        let errs = parse_err("函数 甲(乙 = 1, 丙)\n    返回 1\n结束");
+        let errs = parse_err("函数 甲(整数 乙 = 1, 整数 丙)\n    返回 1\n结束");
         assert!(errs.first_message().unwrap().contains("默认参数后面"));
+    }
+
+    #[test]
+    fn 参数类型在前名字在后() {
+        let prog = parse_ok("函数 求和(整数 甲, 整数 乙) -> 整数\n    返回 甲 加 乙\n结束");
+        match &prog.statements[0] {
+            Stmt::VarDecl(v) => match v.value.as_ref().unwrap() {
+                ast::Expr::Function(f) => {
+                    assert_eq!(f.params[0].name, "甲");
+                    assert_eq!(f.params[0].type_, DeclType::named("整数"));
+                    assert_eq!(f.params[1].name, "乙");
+                }
+                other => panic!("应为函数字面量，实际 {other:?}"),
+            },
+            other => panic!("应为变量声明，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 旧参数语序直接报错() {
+        let errs = parse_err("函数 甲(乙 整数)\n    返回 乙\n结束");
+        assert!(errs
+            .first_message()
+            .unwrap()
+            .contains("类型后应为参数名"));
+    }
+
+    #[test]
+    fn 参数必须显式声明类型() {
+        let errs = parse_err("函数 甲(乙)\n    返回 乙\n结束");
+        assert!(errs
+            .first_message()
+            .unwrap()
+            .contains("类型后应为参数名"));
+    }
+
+    #[test]
+    fn 任意类型作显式动态占位() {
+        let prog = parse_ok("函数 甲(任意 乙)\n    返回 乙\n结束");
+        match &prog.statements[0] {
+            Stmt::VarDecl(v) => match v.value.as_ref().unwrap() {
+                ast::Expr::Function(f) => assert!(f.params[0].type_.is_any()),
+                other => panic!("应为函数字面量，实际 {other:?}"),
+            },
+            other => panic!("应为变量声明，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 匿名联合不能直接作参数类型() {
+        let errs = parse_err("函数 甲(整数 或 字符串 乙)\n    返回 乙\n结束");
+        assert!(errs
+            .first_message()
+            .unwrap()
+            .contains("不允许匿名联合类型"));
+    }
+
+    #[test]
+    fn 默认值类型不符时报错() {
+        let errs = parse_err("函数 甲(整数 乙 = \"x\")\n    返回 乙\n结束");
+        assert!(errs
+            .first_message()
+            .unwrap()
+            .contains("默认值类型 字符串 与声明类型 整数 不一致"));
+    }
+
+    #[test]
+    fn 默认值无法静态推断时报错() {
+        let errs = parse_err("函数 甲(整数 乙 = 取数())\n    返回 乙\n结束");
+        assert!(errs
+            .first_message()
+            .unwrap()
+            .contains("无法静态推断类型"));
+    }
+
+    #[test]
+    fn 字面量默认值通过推断() {
+        let prog = parse_ok("函数 甲(整数 乙 = 3, 字符串 丙 = \"x\")\n    返回 乙\n结束");
+        match &prog.statements[0] {
+            Stmt::VarDecl(v) => match v.value.as_ref().unwrap() {
+                ast::Expr::Function(f) => {
+                    assert!(f.params[0].default.is_some());
+                    assert!(f.params[1].default.is_some());
+                }
+                other => panic!("应为函数字面量，实际 {other:?}"),
+            },
+            other => panic!("应为变量声明，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 模型体内变量关键字已移除() {
+        let errs = parse_err("模型 甲\n    变量 整数 乙\n结束");
+        assert!(errs
+            .first_message()
+            .unwrap()
+            .contains("字段须用 属性 声明"));
+    }
+
+    #[test]
+    fn 模型字段用属性声明() {
+        let prog = parse_ok("模型 甲\n    属性 整数 乙\n    公开 属性 字符串 丙\n结束");
+        match &prog.statements[0] {
+            Stmt::Class(c) => {
+                assert_eq!(c.fields.len(), 2);
+                assert_eq!(c.fields[1].visibility, Visibility::Public);
+            }
+            other => panic!("应为模型定义，实际 {other:?}"),
+        }
     }
 
     #[test]
@@ -3499,7 +3690,7 @@ mod tests {
 
     #[test]
     fn 匿名函数字面量() {
-        let prog = parse_ok("变量 平方 = 函数(数) -> 整数\n    返回 数 乘 数\n结束");
+        let prog = parse_ok("变量 平方 = 函数(整数 数) -> 整数\n    返回 数 乘 数\n结束");
         match &prog.statements[0] {
             Stmt::VarDecl(v) => {
                 assert!(matches!(v.value.as_ref().unwrap(), ast::Expr::Function(_)))
@@ -3510,7 +3701,7 @@ mod tests {
 
     #[test]
     fn 模型定义含字段与嵌入() {
-        let prog = parse_ok("模型 矩形\n    变量 整数 宽\n    变量 整数 高\n结束");
+        let prog = parse_ok("模型 矩形\n    属性 整数 宽\n    属性 整数 高\n结束");
         match &prog.statements[0] {
             Stmt::Class(c) => {
                 assert_eq!(c.name, "矩形");
@@ -3522,7 +3713,7 @@ mod tests {
 
     #[test]
     fn 模型字段可见性() {
-        let prog = parse_ok("模型 账户\n    公开 变量 字符串 名字\n    私有 变量 整数 余额\n结束");
+        let prog = parse_ok("模型 账户\n    公开 属性 字符串 名字\n    私有 属性 整数 余额\n结束");
         match &prog.statements[0] {
             Stmt::Class(c) => {
                 assert_eq!(c.fields[0].visibility, Visibility::Public);
@@ -3534,7 +3725,7 @@ mod tests {
 
     #[test]
     fn 模型嵌入() {
-        let prog = parse_ok("模型 学生\n    嵌入 人\n    变量 学号\n结束");
+        let prog = parse_ok("模型 学生\n    嵌入 人\n    属性 学号\n结束");
         match &prog.statements[0] {
             Stmt::Class(c) => assert_eq!(c.embeds, vec!["人".to_string()]),
             other => panic!("应为模型定义，实际 {other:?}"),
@@ -3543,7 +3734,7 @@ mod tests {
 
     #[test]
     fn 模型缺少结束报错() {
-        let errs = parse_err("模型 矩形\n    变量 整数 宽\n");
+        let errs = parse_err("模型 矩形\n    属性 整数 宽\n");
         assert!(errs.first_message().unwrap().contains("结束"));
     }
 
@@ -3634,7 +3825,7 @@ mod tests {
 
     #[test]
     fn 公开修饰函数() {
-        let prog = parse_ok("公开 函数 加倍(n 整数) -> 整数\n    返回 n 乘 2\n结束");
+        let prog = parse_ok("公开 函数 加倍(整数 n) -> 整数\n    返回 n 乘 2\n结束");
         match &prog.statements[0] {
             Stmt::Visibility(v) => {
                 assert_eq!(v.visibility, Visibility::Public);
@@ -3655,7 +3846,7 @@ mod tests {
 
     #[test]
     fn 私有修饰模型() {
-        let prog = parse_ok("私有 模型 内部\n    变量 甲\n结束");
+        let prog = parse_ok("私有 模型 内部\n    属性 甲\n结束");
         match &prog.statements[0] {
             Stmt::Visibility(v) => assert_eq!(v.visibility, Visibility::Private),
             other => panic!("应为可见性语句，实际 {other:?}"),
@@ -3664,7 +3855,7 @@ mod tests {
 
     #[test]
     fn 标签解析位置参数与命名参数() {
-        let prog = parse_ok("@内建(\"打印\")\n函数 输出(内容 ...)\n    返回 空\n结束");
+        let prog = parse_ok("@内建(\"打印\")\n函数 输出(任意... 内容)\n    返回 空\n结束");
         match &prog.statements[0] {
             Stmt::VarDecl(v) => match v.value.as_ref().unwrap() {
                 ast::Expr::Function(f) => {
@@ -3788,7 +3979,7 @@ mod tests {
 
     #[test]
     fn 分段函数解析出多段() {
-        let prog = parse_ok("函数 根(甲 整数)的段(乙 整数)\n    返回 甲 加 乙\n结束");
+        let prog = parse_ok("函数 根(整数 甲)的段(整数 乙)\n    返回 甲 加 乙\n结束");
         match &prog.statements[0] {
             Stmt::VarDecl(v) => match v.value.as_ref().unwrap() {
                 ast::Expr::Function(f) => {
@@ -3804,7 +3995,10 @@ mod tests {
     #[test]
     fn 分段函数参数必须标注类型() {
         let errs = parse_err("函数 根(甲)的段(乙)\n    返回 1\n结束");
-        assert!(errs.first_message().unwrap().contains("必须显式声明类型"));
+        assert!(errs
+            .first_message()
+            .unwrap()
+            .contains("类型后应为参数名"));
     }
 
     #[test]

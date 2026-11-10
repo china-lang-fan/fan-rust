@@ -362,14 +362,14 @@ mod tests {
     #[test]
     fn 内建绑定后不执行函数体() {
         check(
-            "@内建(\"double\")\n函数 加倍(数) -> 整数\n    返回 0\n结束\n加倍(5)",
+            "@内建(\"double\")\n函数 加倍(任意 数) -> 整数\n    返回 0\n结束\n加倍(5)",
             "10",
         );
     }
 
     #[test]
     fn 未注册的原生名报错() {
-        let (program, _) = parse_program("@内建(\"nope\")\n函数 加倍(数)\n    返回 0\n结束\n");
+        let (program, _) = parse_program("@内建(\"nope\")\n函数 加倍(任意 数)\n    返回 0\n结束\n");
         let mut interp = interp_with_native();
         assert!(interp
             .run(&program)
@@ -384,7 +384,7 @@ mod tests {
     fn 内建标签可写模块名前缀() {
         // `模块名.函数名`：模块名用于加载扩展库，没有库时回落内置默认实现
         check(
-            "@内建(\"json.jsonEncode\")\n函数 生成(值)\n    返回 空\n结束\n生成([1, 2])",
+            "@内建(\"json.jsonEncode\")\n函数 生成(任意 值)\n    返回 空\n结束\n生成([1, 2])",
             "([1,2], 空)",
         );
     }
@@ -393,7 +393,7 @@ mod tests {
     fn 内建标签不写模块名时只取已注册内建() {
         // 不写模块名：只用系统已注册的（core 组）内建，不再按函数名反查模块
         check(
-            "@内建(\"double\")\n函数 加倍(数)\n    返回 空\n结束\n加倍(4)",
+            "@内建(\"double\")\n函数 加倍(任意 数)\n    返回 空\n结束\n加倍(4)",
             "8",
         );
     }
@@ -402,7 +402,7 @@ mod tests {
     fn 内建标签不写模块名时扩展内建报错并提示() {
         // 扩展模块的内建必须写模块名，否则报错并提示正确写法
         let (program, _) =
-            parse_program("@内建(\"jsonEncode\")\n函数 生成(值)\n    返回 0\n结束\n");
+            parse_program("@内建(\"jsonEncode\")\n函数 生成(任意 值)\n    返回 0\n结束\n");
         let mut interp = interp_with_native();
         let err = interp.run(&program).unwrap_err().display();
         assert!(err.contains("模块名.函数名"), "实际：{}", err);
@@ -427,7 +427,7 @@ mod tests {
 
     #[test]
     fn 未知标签名报错() {
-        let (program, _) = parse_program("@自定义\n函数 加倍(数)\n    返回 0\n结束\n");
+        let (program, _) = parse_program("@自定义\n函数 加倍(任意 数)\n    返回 0\n结束\n");
         let mut interp = interp_with_native();
         assert!(interp
             .run(&program)
@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn 无标签的函数照常执行函数体() {
         check(
-            "函数 加倍(数) -> 整数\n    返回 数 乘 2\n结束\n加倍(4)",
+            "函数 加倍(任意 数) -> 整数\n    返回 数 乘 2\n结束\n加倍(4)",
             "8",
         );
     }

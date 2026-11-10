@@ -385,7 +385,7 @@ mod tests {
         write_module(
             &dir,
             "数学",
-            "公开 函数 加倍(数) -> 整数\n    返回 数 乘 2\n结束\n",
+            "公开 函数 加倍(任意 数) -> 整数\n    返回 数 乘 2\n结束\n",
         );
         let loader = Loader::new(Vec::new());
         let found = loader
@@ -426,7 +426,7 @@ mod tests {
         write_module(
             &dir,
             "数学",
-            "公开 函数 加倍(数 整数) -> 整数\n    返回 数 乘 2\n结束\n",
+            "公开 函数 加倍(整数 数) -> 整数\n    返回 数 乘 2\n结束\n",
         );
         let base = dir.to_string_lossy().to_string();
         check(
@@ -468,7 +468,7 @@ mod tests {
         write_module(
             &dir,
             "数学",
-            "公开 函数 加倍(数 整数) -> 整数\n    返回 数 乘 2\n结束\n",
+            "公开 函数 加倍(整数 数) -> 整数\n    返回 数 乘 2\n结束\n",
         );
         let base = dir.to_string_lossy().to_string();
         assert!(run_with_base(
@@ -538,7 +538,7 @@ mod tests {
         write_module(
             &dir,
             "形状",
-            "公开 定义 模型 圆\n    公开 变量 整数 半径\n结束\n公开 定义 圆 的 方法 面积() -> 整数\n    返回 自己.半径 乘 3\n结束\n",
+            "公开 定义 模型 圆\n    公开 属性 整数 半径\n结束\n公开 定义 圆 的 方法 面积() -> 整数\n    返回 自己.半径 乘 3\n结束\n",
         );
         let base = dir.to_string_lossy().to_string();
         check(
@@ -554,7 +554,7 @@ mod tests {
         write_module(
             &dir,
             "数学",
-            "公开 函数 平方(数 整数) -> 整数\n    返回 数 乘 数\n结束\n",
+            "公开 函数 平方(整数 数) -> 整数\n    返回 数 乘 数\n结束\n",
         );
         let base = dir.to_string_lossy().to_string();
         check(

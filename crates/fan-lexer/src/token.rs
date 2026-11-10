@@ -78,6 +78,7 @@ pub enum TokenType {
     Define,
     Var,
     Const,
+    Property,
 
     TypeInt,
     TypeFloat,
@@ -189,6 +190,7 @@ impl fmt::Display for TokenType {
             TokenType::Define => "DEFINE",
             TokenType::Var => "VAR",
             TokenType::Const => "CONST",
+            TokenType::Property => "PROPERTY",
             TokenType::TypeInt => "TYPE_INT",
             TokenType::TypeFloat => "TYPE_FLOAT",
             TokenType::TypeString => "TYPE_STRING",
@@ -287,6 +289,7 @@ pub fn lookup_keyword(ident: &str) -> Option<TokenType> {
         "定义" => TokenType::Define,
         "变量" => TokenType::Var,
         "常量" => TokenType::Const,
+        "属性" => TokenType::Property,
         "整数" => TokenType::TypeInt,
         "小数" => TokenType::TypeFloat,
         "字符串" => TokenType::TypeString,
@@ -375,6 +378,7 @@ pub fn all_keywords() -> Vec<&'static str> {
     let mut v: Vec<&str> = vec![
         "定义",
         "变量",
+        "属性",
         "常量",
         "整数",
         "小数",
