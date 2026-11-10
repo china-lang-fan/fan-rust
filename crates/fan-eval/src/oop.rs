@@ -109,6 +109,15 @@ impl Interpreter {
                 };
                 // 方法同样支持 `@内建`：原生实现会收到接收者作为首个实参。
                 self.process_function_tags(&mut func)?;
+                if cls.methods.contains_key(&stmt.method_name) {
+                    return Err(FanError::at(
+                        format!(
+                            "模型 {} 的方法 {} 重复定义",
+                            cls.name, stmt.method_name
+                        ),
+                        stmt.pos,
+                    ));
+                }
                 cls.methods.insert(stmt.method_name.clone(), Rc::new(func));
                 cls.method_vis
                     .insert(stmt.method_name.clone(), stmt.visibility);
@@ -168,7 +177,16 @@ impl Interpreter {
         self.process_function_tags(&mut func)?;
         let rt = self.env.borrow().runtime();
         rt.borrow_mut()
-            .register_primitive_method(&type_name, &stmt.method_name, Rc::new(func));
+            .register_primitive_method(&type_name, &stmt.method_name, Rc::new(func))
+            .map_err(|_| {
+                FanError::at(
+                    format!(
+                        "类型 {} 上的扩展方法 {} 重复定义",
+                        stmt.class_name, stmt.method_name
+                    ),
+                    stmt.pos,
+                )
+            })?;
         value(Object::Nil)
     }
 
@@ -955,6 +973,37 @@ mod tests {
     fn 未定义的类型名仍报模型未定义() {
         let err = run("定义 甲 的 方法 乙() -> 整数\n    返回 1\n结束\n").unwrap_err();
         assert!(err.contains("模型 甲 未定义"), "实际：{}", err);
+    }
+
+    #[test]
+    fn 扩展方法同名重复定义报错() {
+        let err = run(
+            "定义 整数 的 方法 加倍() -> 整数\n    返回 自己 乘 2\n结束\n\
+             定义 整数 的 方法 加倍() -> 整数\n    返回 自己 乘 3\n结束\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("扩展方法 加倍 重复定义"), "实际：{err}");
+        assert!(err.contains("类型 整数"), "实际：{err}");
+    }
+
+    #[test]
+    fn 不同类型上同名扩展方法不算重复() {
+        check(
+            "定义 整数 的 方法 加倍() -> 整数\n    返回 自己 乘 2\n结束\n\
+             定义 小数 的 方法 加倍() -> 整数\n    返回 1\n结束\n2.加倍()",
+            "4",
+        );
+    }
+
+    #[test]
+    fn 模型方法同名重复定义报错() {
+        let err = run(
+            "模型 点\n    属性 整数 x\n结束\n\
+             定义 点 的 方法 模() -> 整数\n    返回 自己.x\n结束\n\
+             定义 点 的 方法 模() -> 整数\n    返回 自己.x 乘 2\n结束\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("模型 点 的方法 模 重复定义"), "实际：{err}");
     }
 
     #[test]

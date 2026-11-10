@@ -659,6 +659,21 @@ impl Interpreter {
             return value(val);
         }
         // 隐式声明（`甲 = 1`）：已存在则赋值，否则新建。
+        // 硬规则：非分段普通函数同名重复定义直接报错，禁止后定义覆盖。
+        // 分段函数按参数类型签名重载，同名不同签名合法，其同签名重复已由
+        // register_mixfix 拦截；普通变量的重新赋值也不受影响。
+        if let Object::Func(f) = &val {
+            if !f.is_segmented() {
+                if let Some(existing) = e.get(&decl.name) {
+                    if matches!(existing, Object::Func(_)) {
+                        return Err(FanError::at(
+                            format!("函数 {} 重复定义", decl.name),
+                            decl.pos,
+                        ));
+                    }
+                }
+            }
+        }
         if e.has_local(&decl.name) || e.get(&decl.name).is_some() {
             e.assign(&decl.name, val.clone())
                 .map_err(|err| FanError::at(err, decl.pos))?;
@@ -2090,6 +2105,34 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("重复的分段函数签名"), "实际：{err}");
+    }
+
+    #[test]
+    fn 普通函数同名重复定义报错() {
+        let err = run(
+            "函数 甲() -> 整数\n    返回 1\n结束\n\
+             函数 甲() -> 整数\n    返回 2\n结束\n甲()",
+        )
+        .unwrap_err();
+        assert!(err.contains("函数 甲 重复定义"), "实际：{err}");
+    }
+
+    #[test]
+    fn 同名变量重新赋值不受函数重复规则影响() {
+        check("变量 甲 = 1\n甲 = 2\n甲", "2");
+    }
+
+    #[test]
+    fn 分段函数不同签名同名重载仍然合法() {
+        check(
+            "函数 修改(字符串 值)的状态为(字符串 状态) -> 字符串\n\
+                 返回 \"字符串\"\n\
+             结束\n\
+             函数 修改(整数 值)的状态为(字符串 状态) -> 字符串\n\
+                 返回 \"整数\"\n\
+             结束\n修改(1)的状态为(\"a\")",
+            "整数",
+        );
     }
 
     #[test]

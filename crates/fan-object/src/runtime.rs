@@ -190,11 +190,24 @@ impl Runtime {
     }
 
     /// 登记一个为基本类型定义的方法。`type_name` 为类型标识，如 `"string"`。
-    pub fn register_primitive_method(&mut self, type_name: &str, method: &str, func: Rc<Function>) {
-        self.primitive_methods
+    /// 同一类型上同名方法重复登记时报错（硬规则：禁止后定义覆盖）。
+    pub fn register_primitive_method(
+        &mut self,
+        type_name: &str,
+        method: &str,
+        func: Rc<Function>,
+    ) -> Result<(), String> {
+        let table = self
+            .primitive_methods
             .entry(type_name.to_string())
-            .or_default()
-            .insert(method.to_string(), func);
+            .or_default();
+        if table.contains_key(method) {
+            return Err(format!(
+                "类型 {type_name} 上的扩展方法 {method} 重复定义"
+            ));
+        }
+        table.insert(method.to_string(), func);
+        Ok(())
     }
 
     /// 查找为基本类型定义的方法。
