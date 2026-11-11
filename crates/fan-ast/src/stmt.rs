@@ -966,6 +966,7 @@ mod tests {
                 signature: String::new(),
                 return_types: vec![],
                 tags: vec![],
+                native: None,
             },
             primitive: false,
             receiver_name: String::new(),

@@ -19,7 +19,8 @@ pub use expr::format_f64;
 pub use expr::{
     ArrayLit, BinaryExpr, BoolLit, CallExpr, CharLit, CheckExpr, CompositeField, CompositeLit,
     DictLit, DictPair, Expr, FloatLit, FunctionLit, Ident, ImplicitReceiverCallExpr, IndexExpr,
-    IntegerLit, InterpString, MaybeCallExpr, MemberExpr, NamedTagArg, NilLit, Parameter, SliceExpr,
+    IntegerLit, InterpString, MaybeCallExpr, MemberExpr, NamedTagArg, NativeDecl, NilLit,
+    Parameter, SliceExpr,
     SpreadExpr, StringLit, TagExpr, TernaryExpr, ThroughExpr, TupleExpr, TypeCastExpr,
     TypeTestExpr, UnaryExpr, UpdateExpr,
 };

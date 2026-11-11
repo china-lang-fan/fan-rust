@@ -1005,6 +1005,7 @@ impl Parser {
             signature: String::new(),
             return_types,
             tags: Vec::new(),
+            native: None,
         };
         if segments.len() > 1 {
             literal.name_segments = segments.clone();
@@ -1041,6 +1042,7 @@ impl Parser {
             signature: String::new(),
             return_types,
             tags: Vec::new(),
+            native: None,
         }))
     }
 
@@ -1617,6 +1619,7 @@ impl Parser {
                 signature: String::new(),
                 return_types,
                 tags: Vec::new(),
+                native: None,
             },
             primitive,
             receiver_name,

@@ -573,6 +573,38 @@ pub struct Parameter {
     pub default: Option<Expr>,
 }
 
+/// `定义 本地("模块.函数") 函数 ...` 中的本地（native）绑定声明。
+///
+/// `spec` 是源码里的原始字符串；解析期按第一个 `.` 拆成模块名（可空）与
+/// 原生函数名。运行时优先调用对应原生实现，找不到则回退执行函数体。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeDecl {
+    /// 原始绑定字符串，如 `system.print` 或 `print`。
+    pub spec: String,
+    /// 模块前缀（`.` 之前的部分）；无模块前缀时为 `None`。
+    pub module: Option<String>,
+    /// 原生函数名（`.` 之后的部分）。
+    pub name: String,
+    /// `本地` 关键字所在位置，用于诊断与 LSP。
+    pub pos: Position,
+}
+
+impl NativeDecl {
+    /// 按第一个 `.` 拆分绑定字符串，构造本地声明。
+    pub fn parse(spec: &str, pos: Position) -> Self {
+        let (module, name) = match spec.split_once('.') {
+            Some((m, f)) if !m.is_empty() && !f.is_empty() => (Some(m.to_string()), f.to_string()),
+            _ => (None, spec.to_string()),
+        };
+        NativeDecl {
+            spec: spec.to_string(),
+            module,
+            name,
+            pos,
+        }
+    }
+}
+
 /// 函数字面量（具名函数与匿名函数共用）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionLit {
@@ -591,6 +623,10 @@ pub struct FunctionLit {
     pub signature: String,
     pub return_types: Vec<DeclType>,
     pub tags: Vec<TagExpr>,
+    /// `定义 本地(...) 函数 ...` 的本地绑定；普通函数为 `None`。
+    ///
+    /// 装箱以避免 `Expr::Function` 变体体积过大触发 `large_enum_variant`。
+    pub native: Option<Box<NativeDecl>>,
 }
 
 impl FunctionLit {
@@ -766,6 +802,26 @@ mod tests {
 
     fn pos() -> Position {
         Position::new(1, 1)
+    }
+
+    #[test]
+    fn 本地声明按首个点拆分模块与函数名() {
+        let 带模块 = NativeDecl::parse("正则.匹配", pos());
+        assert_eq!(带模块.spec, "正则.匹配");
+        assert_eq!(带模块.module.as_deref(), Some("正则"));
+        assert_eq!(带模块.name, "匹配");
+
+        let 仅函数 = NativeDecl::parse("打印", pos());
+        assert_eq!(仅函数.module, None);
+        assert_eq!(仅函数.name, "打印");
+
+        let 空模块 = NativeDecl::parse(".打印", pos());
+        assert_eq!(空模块.module, None);
+        assert_eq!(空模块.name, ".打印");
+
+        let 空函数 = NativeDecl::parse("正则.", pos());
+        assert_eq!(空函数.module, None);
+        assert_eq!(空函数.name, "正则.");
     }
 
     fn int(v: i64) -> Expr {
@@ -1044,8 +1100,12 @@ mod tests {
             signature: String::new(),
             return_types: vec![DeclType::named("整数")],
             tags: vec![],
+            native: None,
         };
-        assert_eq!(f.to_string(), "函数 求和(整数 甲, 任意... 乙) 返回 整数  结束");
+        assert_eq!(
+            f.to_string(),
+            "函数 求和(整数 甲, 任意... 乙) 返回 整数  结束"
+        );
     }
 
     #[test]
@@ -1064,6 +1124,7 @@ mod tests {
             signature: String::new(),
             return_types: vec![],
             tags: vec![],
+            native: None,
         };
         assert_eq!(f.to_string(), "函数()  结束");
     }
@@ -1092,6 +1153,7 @@ mod tests {
             signature: String::new(),
             return_types: vec![],
             tags: vec![],
+            native: None,
         };
         assert_eq!(f.to_string(), "函数 问候(任意 称呼 = \"你好\")  结束");
     }
@@ -1228,6 +1290,7 @@ mod tests {
             signature: String::new(),
             return_types: vec![],
             tags: vec![],
+            native: None,
         };
         assert!(f.is_segmented());
         f.name_segments = vec!["根".to_string()];
