@@ -248,7 +248,7 @@ mod tests {
         let entry = dir.join("主.凡");
         let source = "导入 \"工具\" 作为 工具模块\n";
         let index = Index::build(&path_to_uri(&entry.to_string_lossy()), source);
-        let doc = Document::parse(&path_to_uri(&entry.to_string_lossy()), source);
+        let doc = Document::parse(path_to_uri(&entry.to_string_lossy()), source);
         assert!(doc.check_imports(&index).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }

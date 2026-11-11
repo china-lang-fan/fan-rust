@@ -4,7 +4,7 @@
 //! fan 运行 <脚本.凡> [参数...]   执行脚本
 //! fan 测试 [目录或文件]          执行 *_测试.凡 中的测试函数
 //! fan 交互                      进入交互式求值（REPL）
-//! fan lsp                       启动语言服务器（占位，批次4落地）
+//! fan lsp                       启动语言服务器（LSP/stdio）
 //! fan 版本                      输出版本
 //! fan 帮助                      输出用法
 //! ```
@@ -73,7 +73,7 @@ fn usage_text() -> String {
           \x20 fan 运行 <脚本.凡> [参数...]   执行脚本\n\
           \x20 fan 测试 [目录或文件]          执行 *_测试.凡 中的测试函数\n\
           \x20 fan 交互                      进入交互式求值（REPL）\n\
-          \x20 fan lsp                       启动语言服务器（占位，批次4落地）\n\
+          \x20 fan lsp                       启动语言服务器（LSP/stdio）\n\
           \x20 fan 版本                      输出版本\n\
           \x20 fan 帮助                      输出本帮助\n\
          \n\
@@ -168,15 +168,18 @@ fn run_repl<I: BufRead, O: Write>(input: I, mut output: O) -> Result<(), String>
     Ok(())
 }
 
-/// LSP 子命令占位。
-///
-/// 完整的 JSON-RPC/stdio 语言服务器在 `fan-lsp` crate 内实现（批次4）；
-/// 分帧（`fan_lsp::read_message`/`write_message`）与协议结构已就绪，
-/// 待 `fan-analysis` 符号分析落地后在此启动服务器主循环。
+/// 启动 LSP 语言服务器：在标准输入/输出上按 JSON-RPC、`Content-Length`
+/// 分帧与编辑器通信，直到收到 `exit` 或输入结束。
 fn run_lsp() -> Result<(), String> {
-    // 引用一次以确认编译期依赖已打通，阶段3替换为真正的服务器启动。
-    let _ = fan_lsp::SERVER_NAME;
-    Err("LSP 语言服务器将在批次 4 落地（fan-lsp crate）".to_string())
+    let stdin = std::io::stdin();
+    // Stdout 本身是 Send + Write（内部自带锁），而本目标的 StdoutLock
+    // 不是 Send，无法移入防抖线程，因此直接传 Stdout 而非其锁守卫。
+    let stdout = std::io::stdout();
+    let mut reader = std::io::BufReader::new(stdin.lock());
+    let mut server = fan_lsp::Server::new();
+    server
+        .run(&mut reader, stdout)
+        .map_err(|e| format!("LSP 服务器异常：{e}"))
 }
 
 fn abs_path(path: &str) -> String {
@@ -329,8 +332,12 @@ mod tests {
     }
 
     #[test]
-    fn lsp子命令返回未落地提示() {
-        let err = run(args(&["lsp"])).unwrap_err();
-        assert!(err.contains("批次 4"), "实际：{err}");
+    fn lsp服务器在空输入上干净退出() {
+        // stdin 立即 EOF（无消息）时服务器应正常返回而非报错。
+        let result = fan_lsp::Server::new().run(
+            &mut std::io::Cursor::new(Vec::new()),
+            Vec::<u8>::new(),
+        );
+        assert!(result.is_ok(), "空输入应正常结束：{result:?}");
     }
 }
