@@ -247,19 +247,18 @@ impl Index {
         if i < 0 {
             return None;
         }
-        let connector_len;
-        if runes[i as usize] == '.' {
-            connector_len = 1isize;
+        let connector_len = if runes[i as usize] == '.' {
+            1isize
         } else if i >= 2
             && runes[(i - 2) as usize..=i as usize]
                 .iter()
                 .collect::<String>()
                 == "的"
         {
-            connector_len = 3;
+            3
         } else {
             return None;
-        }
+        };
         i -= connector_len;
         while i >= 0 && (runes[i as usize] == ' ' || runes[i as usize] == '\t') {
             i -= 1;
