@@ -169,8 +169,7 @@ impl Parser {
                     _ if is_type_token(self.cur.type_) && self.peek.type_ == TokenType::Member => {
                         self.parse_method_definition()
                     }
-                    _ => self.parse_var_decl(),
-                }
+                    _ => self.parse_var_decl(),                }
             }
             TokenType::Function => self.parse_function_statement(),
             TokenType::Return => self.parse_return_statement(),
@@ -891,6 +890,7 @@ impl Parser {
         self.next();
         let mut inner = match self.cur.type_ {
             TokenType::Function => self.parse_function_statement(),
+            TokenType::Local => self.parse_native_function_statement(),
             TokenType::Class => self.parse_class_statement(),
             TokenType::Interface => self.parse_interface_statement(),
             TokenType::TypeDef => self.parse_type_def_statement(),
@@ -901,6 +901,7 @@ impl Parser {
                 self.next();
                 match self.cur.type_ {
                     TokenType::Function => self.parse_function_statement(),
+                    TokenType::Local => self.parse_native_function_statement(),
                     TokenType::Class => self.parse_class_statement(),
                     TokenType::Interface => self.parse_interface_statement(),
                     TokenType::TypeDef => self.parse_type_def_statement(),
@@ -4348,6 +4349,32 @@ mod tests {
         assert_eq!(n.spec, "打印");
         assert_eq!(n.module, None);
         assert_eq!(n.name, "打印");
+    }
+
+    #[test]
+    fn 本地绑定可带公开可见性() {
+        let prog = parse_ok("定义 公开 本地(\"print\") 函数 打印(任意... 内容)\n    返回 空\n结束");
+        let stmt = &prog.statements[0];
+        let Stmt::Visibility(v) = stmt else {
+            panic!("应为可见性语句，实际 {stmt:?}")
+        };
+        assert_eq!(v.visibility, Visibility::Public);
+        let Stmt::VarDecl(decl) = &*v.inner else {
+            panic!("可见性内应是变量声明")
+        };
+        let Some(ast::Expr::Function(f)) = &decl.value else {
+            panic!("应为函数字面量")
+        };
+        assert_eq!(f.native.as_ref().unwrap().name, "print");
+    }
+
+    #[test]
+    fn 本地绑定可带私有可见性() {
+        let prog = parse_ok("定义 私有 本地(\"print\") 函数 打印(任意... 内容)\n    返回 空\n结束");
+        let Stmt::Visibility(v) = &prog.statements[0] else {
+            panic!("应为可见性语句")
+        };
+        assert_eq!(v.visibility, Visibility::Private);
     }
 
     #[test]
