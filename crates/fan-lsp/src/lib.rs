@@ -6,9 +6,12 @@
 
 /// LSP 协议结构体（serde 序列化）。
 pub mod protocol;
+/// LSP 服务器主循环、文档生命周期与防抖诊断。
+pub mod server;
 /// stdio 上的 `Content-Length` 分帧读写。
 pub mod transport;
 
+pub use server::Server;
 pub use transport::{read_message, write_message};
 
 /// 服务器名称，用于 `initialize` 响应的 `serverInfo`。

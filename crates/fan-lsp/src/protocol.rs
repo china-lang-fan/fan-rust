@@ -44,3 +44,28 @@ pub mod severity {
     pub const INFORMATION: u8 = 3;
     pub const HINT: u8 = 4;
 }
+
+/// LSP CompletionItemKind 数值（仅列本服务器用到的）。
+pub mod completion_kind {
+    pub const TEXT: i64 = 1;
+    pub const METHOD: i64 = 2;
+    pub const FUNCTION: i64 = 3;
+    pub const FIELD: i64 = 5;
+    pub const VARIABLE: i64 = 6;
+    pub const CLASS: i64 = 7;
+    pub const INTERFACE: i64 = 8;
+    pub const MODULE: i64 = 9;
+    pub const PARAMETER: i64 = 14;
+    pub const CONSTANT: i64 = 21;
+}
+
+/// JSON-RPC 预定义错误码。
+pub mod error_code {
+    /// 方法不存在或未实现。
+    pub const METHOD_NOT_FOUND: i32 = -32601;
+    /// 内部错误（panic 兜底）。
+    pub const INTERNAL_ERROR: i32 = -32603;
+}
+
+/// 诊断防抖间隔（毫秒）。
+pub const PUBLISH_DEBOUNCE_MS: u64 = 250;
