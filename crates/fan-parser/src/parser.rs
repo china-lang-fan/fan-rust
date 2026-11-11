@@ -152,6 +152,7 @@ impl Parser {
                 match self.cur.type_ {
                     TokenType::Public => self.parse_visibility_statement(Visibility::Public),
                     TokenType::Private => self.parse_visibility_statement(Visibility::Private),
+                    TokenType::Local => self.parse_native_function_statement(),
                     TokenType::Function => self.parse_function_statement(),
                     TokenType::Class => self.parse_class_statement(),
                     TokenType::Interface => self.parse_interface_statement(),
@@ -937,6 +938,66 @@ impl Parser {
     // ------------------------------------------------------------ 函数
 
     fn parse_function_statement(&mut self) -> Option<Stmt> {
+        self.parse_function_statement_with_native(None)
+    }
+
+    /// `定义 本地("模块.函数") 函数 名字(...) ... 结束`。
+    ///
+    /// 仅允许出现在顶层函数：硬规则为 `本地` 后必须紧跟括号，括号内只能是
+    /// 单个字符串字面量，随后必须是 `函数`。
+    fn parse_native_function_statement(&mut self) -> Option<Stmt> {
+        let native = self.parse_native_decl()?;
+        if self.cur.type_ != TokenType::Function {
+            let t = self.cur.clone();
+            self.add_error(&t, "本地 声明后应为 函数 定义");
+            return None;
+        }
+        self.parse_function_statement_with_native(Some(native))
+    }
+
+    /// 消费 `本地("模块.函数")`，返回本地绑定声明。
+    ///
+    /// 硬规则：必须有括号；括号内只接受单个普通字符串字面量（插值字符串、
+    /// 变量、缺参、空括号均报错）。
+    fn parse_native_decl(&mut self) -> Option<ast::NativeDecl> {
+        let pos = self.cur_pos();
+        self.next(); // 消费 本地
+        if self.cur.type_ != TokenType::LParen {
+            let t = self.cur.clone();
+            self.add_error(&t, "本地 后应为括号包裹的字符串字面量：本地(\"模块.函数\")");
+            return None;
+        }
+        self.next(); // 消费 (
+        let spec = match self.cur.type_ {
+            TokenType::Str => {
+                let value = self.cur.literal.clone();
+                self.next();
+                value
+            }
+            TokenType::RParen => {
+                let t = self.cur.clone();
+                self.add_error(&t, "本地 绑定缺少字符串字面量");
+                return None;
+            }
+            _ => {
+                let t = self.cur.clone();
+                self.add_error(&t, "本地 绑定只接受字符串字面量，不支持插值或变量");
+                return None;
+            }
+        };
+        if self.cur.type_ != TokenType::RParen {
+            let t = self.cur.clone();
+            self.add_error(&t, "本地 绑定只能有一个字符串参数");
+            return None;
+        }
+        self.next(); // 消费 )
+        Some(ast::NativeDecl::parse(&spec, pos))
+    }
+
+    fn parse_function_statement_with_native(
+        &mut self,
+        native: Option<ast::NativeDecl>,
+    ) -> Option<Stmt> {
         let pos = self.cur_pos();
         self.next();
         if !is_function_name_token(self.cur.type_) {
@@ -1005,7 +1066,7 @@ impl Parser {
             signature: String::new(),
             return_types,
             tags: Vec::new(),
-            native: None,
+            native: native.map(Box::new),
         };
         if segments.len() > 1 {
             literal.name_segments = segments.clone();
@@ -1594,6 +1655,11 @@ impl Parser {
             return None;
         }
         self.next();
+        if self.cur.type_ == TokenType::Local {
+            let t = self.cur.clone();
+            self.add_error(&t, "本地 绑定只能用于顶层函数，不能用于类型方法");
+            return None;
+        }
         if self.cur.type_ != TokenType::Ident {
             let t = self.cur.clone();
             self.add_error(&t, "方法需要名字");
@@ -4249,5 +4315,74 @@ mod tests {
             })),
             ""
         );
+    }
+
+    // ------------------------------------------------ 本地(native) 绑定
+
+    /// 从源码首条语句取出函数字面量。
+    fn first_function(prog: &Program) -> &ast::FunctionLit {
+        match &prog.statements[0] {
+            Stmt::VarDecl(v) => match v.value.as_ref().unwrap() {
+                ast::Expr::Function(f) => f,
+                other => panic!("应为函数字面量，实际 {other:?}"),
+            },
+            other => panic!("应为变量声明，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 本地绑定带模块前缀() {
+        let prog = parse_ok("定义 本地(\"正则.匹配\") 函数 匹配(任意 内容)\n    返回 空\n结束");
+        let f = first_function(&prog);
+        let n = f.native.as_ref().expect("应有本地声明");
+        assert_eq!(n.spec, "正则.匹配");
+        assert_eq!(n.module.as_deref(), Some("正则"));
+        assert_eq!(n.name, "匹配");
+    }
+
+    #[test]
+    fn 本地绑定不带模块前缀() {
+        let prog = parse_ok("定义 本地(\"打印\") 函数 输出(任意... 内容)\n    返回 空\n结束");
+        let f = first_function(&prog);
+        let n = f.native.as_ref().unwrap();
+        assert_eq!(n.spec, "打印");
+        assert_eq!(n.module, None);
+        assert_eq!(n.name, "打印");
+    }
+
+    #[test]
+    fn 本地后缺括号报错() {
+        let errs = parse_err("定义 本地 函数 甲()\n    返回 空\n结束");
+        assert!(errs.first_message().unwrap().contains("括号"));
+    }
+
+    #[test]
+    fn 本地空括号报错() {
+        let errs = parse_err("定义 本地() 函数 甲()\n    返回 空\n结束");
+        assert!(errs.first_message().unwrap().contains("字符串字面量"));
+    }
+
+    #[test]
+    fn 本地绑定不接受插值字符串() {
+        let errs = parse_err("定义 本地(\"前缀.${名字}\") 函数 甲()\n    返回 空\n结束");
+        assert!(errs.first_message().unwrap().contains("只接受字符串字面量"));
+    }
+
+    #[test]
+    fn 本地绑定多参数报错() {
+        let errs = parse_err("定义 本地(\"a\", \"b\") 函数 甲()\n    返回 空\n结束");
+        assert!(errs.first_message().unwrap().contains("一个字符串参数"));
+    }
+
+    #[test]
+    fn 本地声明后必须是函数() {
+        let errs = parse_err("定义 本地(\"打印\") 变量 甲 = 1");
+        assert!(errs.first_message().unwrap().contains("函数"));
+    }
+
+    #[test]
+    fn 本地不能用于类型方法() {
+        let errs = parse_err("定义 矩形 的 方法 本地(\"绘制\") 画()\n    返回 空\n结束");
+        assert!(errs.first_message().unwrap().contains("不能用于类型方法"));
     }
 }
