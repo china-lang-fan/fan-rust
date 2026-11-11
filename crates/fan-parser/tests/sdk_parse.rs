@@ -31,16 +31,30 @@ fn sdk_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fan-sdk")
 }
 
-/// 收集目录下所有 `.凡` 文件，按名字排序。
+/// 递归收集目录下所有 `.凡` 文件，按路径排序。
+///
+/// 标准库已按 `库/`（模块）与 `测试/`（测试）分子目录组织，故必须递归遍历，
+/// 不能只读取顶层。
 fn fan_files(dir: &Path) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-        .expect("fan-sdk 目录应可读")
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("凡"))
-        .collect();
+    let mut files = Vec::new();
+    collect(dir, &mut files);
     files.sort();
     files
+}
+
+fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect(&path, out);
+        } else if path.extension().and_then(|s| s.to_str()) == Some("凡") {
+            out.push(path);
+        }
+    }
 }
 
 #[test]

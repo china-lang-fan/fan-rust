@@ -3,9 +3,12 @@
 //! 这些用例直接加载 `fan-sdk` 下的源文件，是「内建框架 + 标准库」整条链路
 //! 的验收测试，而非单纯的单元测试。
 
-use fan_eval::Interpreter;
+use fan_eval::{default_modules_dirs, Interpreter};
+use fan_object::Runtime;
 use fan_parser::parse_program;
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 /// 标准库目录。
 ///
@@ -43,8 +46,11 @@ fn run(src: &str) -> Result<fan_object::Object, String> {
     if !errors.is_empty() {
         return Err(format!("解析错误：{errors}"));
     }
-    let mut interp = Interpreter::new();
-    interp.env.borrow_mut().set_base_dir(sdk());
+    // 标准库已按 库/ 子目录组织，模块间用根相对路径（库/系统）互导。
+    // 配置 SDK 根为模块搜索目录，使嵌套导入能经 modules_dirs 兜底解析。
+    let root = sdk();
+    let rt = Rc::new(RefCell::new(Runtime::new()));
+    let mut interp = Interpreter::for_script(rt, default_modules_dirs(&root), &root, "sdk_smoke");
     interp.run(&program).map_err(|e| e.display())
 }
 
@@ -52,15 +58,15 @@ fn run(src: &str) -> Result<fan_object::Object, String> {
 
 #[test]
 fn 系统模块类型名() {
-    let out = run("导入 \"系统\" 作为 系统模块\n系统模块.类型名(1)").unwrap();
+    let out = run("导入 \"库/系统\" 作为 系统模块\n系统模块.类型名(1)").unwrap();
     assert_eq!(out.inspect(), "integer");
 }
 
 #[test]
 fn 系统模块长度与追加() {
-    let out = run("导入 \"系统\" 作为 系统模块\n系统模块.长度([1, 2, 3])").unwrap();
+    let out = run("导入 \"库/系统\" 作为 系统模块\n系统模块.长度([1, 2, 3])").unwrap();
     assert_eq!(out.inspect(), "3");
-    let out = run("导入 \"系统\" 作为 系统模块\n系统模块.追加([1], 2)").unwrap();
+    let out = run("导入 \"库/系统\" 作为 系统模块\n系统模块.追加([1], 2)").unwrap();
     assert_eq!(out.inspect(), "[1, 2]");
 }
 
@@ -68,15 +74,15 @@ fn 系统模块长度与追加() {
 
 #[test]
 fn 转换模块解析整数() {
-    let out = run("导入 \"转换\" 作为 转换模块\n转换模块.转整数(\"42\")").unwrap();
+    let out = run("导入 \"库/转换\" 作为 转换模块\n转换模块.转整数(\"42\")").unwrap();
     assert_eq!(out.inspect(), "42");
 }
 
 #[test]
 fn 转换模块转字符串() {
-    let out = run("导入 \"转换\" 作为 转换模块\n转换模块.转字符串(42)").unwrap();
+    let out = run("导入 \"库/转换\" 作为 转换模块\n转换模块.转字符串(42)").unwrap();
     assert_eq!(out.inspect(), "42");
-    let out = run("导入 \"转换\" 作为 转换模块\n转换模块.转字符串(1.5)").unwrap();
+    let out = run("导入 \"库/转换\" 作为 转换模块\n转换模块.转字符串(1.5)").unwrap();
     assert_eq!(out.inspect(), "1.5");
 }
 
@@ -84,22 +90,22 @@ fn 转换模块转字符串() {
 
 #[test]
 fn 数学模块平方根与幂() {
-    let out = run("导入 \"数学\" 作为 数学模块\n数学模块.平方根(9.0)").unwrap();
+    let out = run("导入 \"库/数学\" 作为 数学模块\n数学模块.平方根(9.0)").unwrap();
     assert_eq!(out.inspect(), "3");
-    let out = run("导入 \"数学\" 作为 数学模块\n数学模块.幂(2.0, 10.0)").unwrap();
+    let out = run("导入 \"库/数学\" 作为 数学模块\n数学模块.幂(2.0, 10.0)").unwrap();
     assert_eq!(out.inspect(), "1024");
 }
 
 #[test]
 fn 数学模块纯凡语言实现的函数() {
     // 绝对值/四舍五入/总和/斜边长 全部用凡语言写成，验证其可用
-    let out = run("导入 \"数学\" 作为 数学模块\n数学模块.绝对值(-7)").unwrap();
+    let out = run("导入 \"库/数学\" 作为 数学模块\n数学模块.绝对值(-7)").unwrap();
     assert_eq!(out.inspect(), "7");
-    let out = run("导入 \"数学\" 作为 数学模块\n数学模块.四舍五入(3.6)").unwrap();
+    let out = run("导入 \"库/数学\" 作为 数学模块\n数学模块.四舍五入(3.6)").unwrap();
     assert_eq!(out.inspect(), "4");
-    let out = run("导入 \"数学\" 作为 数学模块\n数学模块.总和([1, 2, 3, 4])").unwrap();
+    let out = run("导入 \"库/数学\" 作为 数学模块\n数学模块.总和([1, 2, 3, 4])").unwrap();
     assert_eq!(out.inspect(), "10");
-    let out = run("导入 \"数学\" 作为 数学模块\n数学模块.斜边长(3.0, 4.0)").unwrap();
+    let out = run("导入 \"库/数学\" 作为 数学模块\n数学模块.斜边长(3.0, 4.0)").unwrap();
     assert_eq!(out.inspect(), "5");
 }
 
@@ -111,12 +117,12 @@ fn 数学模块纯凡语言实现的函数() {
 #[test]
 fn 编码模块base64往返() {
     // 生成/解析类函数返回 (值, 错误) 多元值，故显示形如 `(凡, 空)`
-    let encoded = run("导入 \"编码\" 作为 编码模块\n编码模块.生成Base64(\"凡\")")
+    let encoded = run("导入 \"库/编码\" 作为 编码模块\n编码模块.生成Base64(\"凡\")")
         .unwrap()
         .inspect();
     assert_eq!(encoded, "5Yeh", "Base64 编码结果：{encoded}");
     let back = run(&format!(
-        "导入 \"编码\" 作为 编码模块\n编码模块.解析Base64(\"{}\")",
+        "导入 \"库/编码\" 作为 编码模块\n编码模块.解析Base64(\"{}\")",
         encoded
     ))
     .unwrap();
@@ -125,16 +131,17 @@ fn 编码模块base64往返() {
 
 #[test]
 fn 编码模块json往返() {
-    let out = run("导入 \"编码\" 作为 编码模块\n编码模块.生成JSON([1, 2, 3])").unwrap();
+    let out = run("导入 \"库/编码\" 作为 编码模块\n编码模块.生成JSON([1, 2, 3])").unwrap();
     assert_eq!(out.inspect(), "([1,2,3], 空)");
-    let back = run("导入 \"编码\" 作为 编码模块\n编码模块.解析JSON(\"[1,2,3]\")").unwrap();
+    let back = run("导入 \"库/编码\" 作为 编码模块\n编码模块.解析JSON(\"[1,2,3]\")").unwrap();
     assert_eq!(back.inspect(), "([1, 2, 3], 空)");
 }
 
 #[test]
 fn 编码模块json支持中文() {
-    let back = run("导入 \"编码\" 作为 编码模块\n编码模块.解析JSON(\"{\\\"名字\\\":\\\"凡\\\"}\")")
-        .unwrap();
+    let back =
+        run("导入 \"库/编码\" 作为 编码模块\n编码模块.解析JSON(\"{\\\"名字\\\":\\\"凡\\\"}\")")
+            .unwrap();
     assert!(back.inspect().contains("凡"), "实际：{}", back.inspect());
 }
 
@@ -144,19 +151,19 @@ fn 编码模块json支持中文() {
 
 #[test]
 fn 数组模块纯凡语言实现() {
-    let out = run("导入 \"数组\" 作为 数组模块\n数组模块.反转([1, 2, 3])").unwrap();
+    let out = run("导入 \"库/数组\" 作为 数组模块\n数组模块.反转([1, 2, 3])").unwrap();
     assert_eq!(out.inspect(), "[3, 2, 1]");
 }
 
 #[test]
 fn 字符串模块纯凡语言实现() {
-    let out = run("导入 \"字符串\" 作为 字符串模块\n字符串模块.包含(\"甲乙\", \"乙\")").unwrap();
+    let out = run("导入 \"库/字符串\" 作为 字符串模块\n字符串模块.包含(\"甲乙\", \"乙\")").unwrap();
     assert_eq!(out.inspect(), "真");
 }
 
 #[test]
 fn 随机模块() {
-    let out = run("导入 \"随机\" 作为 随机模块\n随机模块.随机整数(10)").unwrap();
+    let out = run("导入 \"库/随机\" 作为 随机模块\n随机模块.随机整数(10)").unwrap();
     let n: i64 = out.inspect().parse().unwrap();
     assert!((0..10).contains(&n), "越界：{}", n);
 }
@@ -165,14 +172,14 @@ fn 随机模块() {
 
 #[test]
 fn 文件模块临时目录() {
-    let out = run("导入 \"文件\" 作为 文件模块\n文件模块.临时目录(\"fan-sdk-\")").unwrap();
+    let out = run("导入 \"库/文件\" 作为 文件模块\n文件模块.临时目录(\"fan-sdk-\")").unwrap();
     // 返回 (路径, 错误)，错误应为空
     assert!(out.inspect().ends_with("空)"), "实际：{}", out.inspect());
 }
 
 #[test]
 fn 文件模块写入读取往返() {
-    let out = run("导入 \"文件\" 作为 文件模块\n\
+    let out = run("导入 \"库/文件\" 作为 文件模块\n\
          变量 目录, 错误值 = 文件模块.临时目录(\"fan-sdk-\")\n\
          变量 路径 = 文件模块.拼路径(目录, \"a.txt\")\n\
          文件模块.写入(路径, \"甲\")\n\
@@ -185,7 +192,7 @@ fn 文件模块写入读取往返() {
 
 #[test]
 fn 文件模块追加() {
-    let out = run("导入 \"文件\" 作为 文件模块\n\
+    let out = run("导入 \"库/文件\" 作为 文件模块\n\
          变量 目录, 错误值 = 文件模块.临时目录(\"fan-sdk-\")\n\
          变量 路径 = 文件模块.拼路径(目录, \"b.txt\")\n\
          文件模块.写入(路径, \"甲\")\n\
@@ -199,9 +206,9 @@ fn 文件模块追加() {
 
 #[test]
 fn 文件模块存在性与路径() {
-    let out = run("导入 \"文件\" 作为 文件模块\n文件模块.路径分隔符()").unwrap();
+    let out = run("导入 \"库/文件\" 作为 文件模块\n文件模块.路径分隔符()").unwrap();
     assert!(!out.inspect().is_empty(), "路径分隔符为空");
-    let out = run("导入 \"文件\" 作为 文件模块\n文件模块.文件名(\"甲/乙.txt\")").unwrap();
+    let out = run("导入 \"库/文件\" 作为 文件模块\n文件模块.文件名(\"甲/乙.txt\")").unwrap();
     assert_eq!(out.inspect(), "乙.txt");
 }
 
@@ -209,13 +216,13 @@ fn 文件模块存在性与路径() {
 
 #[test]
 fn 时间模块格式化() {
-    let out = run("导入 \"时间\" 作为 时间模块\n时间模块.格式化(0, \"2006-01-02\")").unwrap();
+    let out = run("导入 \"库/时间\" 作为 时间模块\n时间模块.格式化(0, \"2006-01-02\")").unwrap();
     assert_eq!(out.inspect(), "1970-01-01");
 }
 
 #[test]
 fn 时间模块解析日期往返() {
-    let out = run("导入 \"时间\" 作为 时间模块\n\
+    let out = run("导入 \"库/时间\" 作为 时间模块\n\
          变量 时间戳, 错误值 = 时间模块.解析日期(\"2020-01-01\")\n\
          时间模块.格式化(时间戳, 时间模块.日期格式)")
     .unwrap();
@@ -224,13 +231,13 @@ fn 时间模块解析日期往返() {
 
 #[test]
 fn 时间模块解析失败返回错误() {
-    let out = run("导入 \"时间\" 作为 时间模块\n时间模块.解析日期(\"bad\")").unwrap();
+    let out = run("导入 \"库/时间\" 作为 时间模块\n时间模块.解析日期(\"bad\")").unwrap();
     assert!(out.inspect().starts_with("(0,"), "实际：{}", out.inspect());
 }
 
 #[test]
 fn 时间模块时间分量() {
-    let out = run("导入 \"时间\" 作为 时间模块\n\
+    let out = run("导入 \"库/时间\" 作为 时间模块\n\
          变量 时间戳, 错误值 = 时间模块.解析(时间模块.默认格式, \"2020-06-15 10:20:30\")\n\
          变量 分量 = 时间模块.时间分量(时间戳)\n\
          分量[\"year\"]")
@@ -240,7 +247,7 @@ fn 时间模块时间分量() {
 
 #[test]
 fn 时间模块当前时间戳() {
-    let out = run("导入 \"时间\" 作为 时间模块\n时间模块.当前时间戳()").unwrap();
+    let out = run("导入 \"库/时间\" 作为 时间模块\n时间模块.当前时间戳()").unwrap();
     assert!(out.inspect().parse::<i64>().unwrap() > 0);
 }
 
@@ -248,13 +255,13 @@ fn 时间模块当前时间戳() {
 
 #[test]
 fn 进程模块进程号() {
-    let out = run("导入 \"进程\" 作为 进程模块\n进程模块.进程号()").unwrap();
+    let out = run("导入 \"库/进程\" 作为 进程模块\n进程模块.进程号()").unwrap();
     assert!(out.inspect().parse::<i64>().unwrap() > 0);
 }
 
 #[test]
 fn 进程模块环境变量() {
-    let out = run("导入 \"进程\" 作为 进程模块\n\
+    let out = run("导入 \"库/进程\" 作为 进程模块\n\
          进程模块.设置环境变量(\"FAN_SDK_SMOKE\", \"凡\")\n\
          进程模块.环境变量(\"FAN_SDK_SMOKE\")")
     .unwrap();
@@ -263,7 +270,7 @@ fn 进程模块环境变量() {
 
 #[test]
 fn 进程模块脚本为文本() {
-    let out = run("导入 \"系统\" 作为 系统模块\n导入 \"进程\" 作为 进程模块\n系统模块.类型名(进程模块.脚本())").unwrap();
+    let out = run("导入 \"库/系统\" 作为 系统模块\n导入 \"库/进程\" 作为 进程模块\n系统模块.类型名(进程模块.脚本())").unwrap();
     assert_eq!(out.inspect(), "string");
 }
 
@@ -274,15 +281,15 @@ fn 进程模块脚本为文本() {
 #[test]
 fn 正则模块匹配与查找() {
     // 匹配/查找均返回 (值, 错误) 多元值
-    let out = run("导入 \"正则\" 作为 正则模块\n正则模块.匹配(\"\\d+\", \"a123b\")").unwrap();
+    let out = run("导入 \"库/正则\" 作为 正则模块\n正则模块.匹配(\"\\d+\", \"a123b\")").unwrap();
     assert_eq!(out.inspect(), "(真, 空)");
-    let out = run("导入 \"正则\" 作为 正则模块\n正则模块.查找(\"\\d+\", \"a12b34\")").unwrap();
+    let out = run("导入 \"库/正则\" 作为 正则模块\n正则模块.查找(\"\\d+\", \"a12b34\")").unwrap();
     assert_eq!(out.inspect(), "(12, 空)");
 }
 
 #[test]
 fn 正则模块分组() {
-    let out = run("导入 \"正则\" 作为 正则模块\n\
+    let out = run("导入 \"库/正则\" 作为 正则模块\n\
          变量 分组结果, 错误值 = 正则模块.分组(\"([a-z]+)(\\d+)\", \"abc123\")\n\
          分组结果[1]")
     .unwrap();
@@ -291,19 +298,19 @@ fn 正则模块分组() {
 
 #[test]
 fn 正则模块替换与拆分() {
-    let out = run("导入 \"正则\" 作为 正则模块\n\
+    let out = run("导入 \"库/正则\" 作为 正则模块\n\
          变量 结果, 错误值 = 正则模块.全部替换(\"(\\w+)\", \"a b\", \"[$1]\")\n\
          结果")
     .unwrap();
     assert_eq!(out.inspect(), "[a] [b]");
-    let out = run("导入 \"正则\" 作为 正则模块\n正则模块.拆分(\"[,;]\", \"a,b;c\")").unwrap();
+    let out = run("导入 \"库/正则\" 作为 正则模块\n正则模块.拆分(\"[,;]\", \"a,b;c\")").unwrap();
     assert_eq!(out.inspect(), "([a, b, c], 空)");
 }
 
 #[test]
 fn 正则模块非法模式返回错误() {
     // 具体措辞取决于用的是扩展库还是默认实现，这里只要求「返回错误」
-    let out = run("导入 \"正则\" 作为 正则模块\n正则模块.查找(\"(\", \"abc\")").unwrap();
+    let out = run("导入 \"库/正则\" 作为 正则模块\n正则模块.查找(\"(\", \"abc\")").unwrap();
     assert!(out.inspect().contains("错误"), "实际：{}", out.inspect());
 }
 
@@ -313,7 +320,7 @@ fn 正则模块非法模式返回错误() {
 
 #[test]
 fn 网络模块加载并处理非法地址() {
-    let out = run("导入 \"网络\" 作为 网络模块\n\
+    let out = run("导入 \"库/网络\" 作为 网络模块\n\
          变量 结果, 错误值 = 网络模块.请求(\"GET\", \"bad-url\", 空)\n\
          结果[\"success\"]")
     .unwrap();
@@ -329,7 +336,7 @@ fn 网络模块加载并处理非法地址() {
 #[test]
 fn 正则模块登记了实现来源() {
     let (program, errors) =
-        parse_program("导入 \"正则\" 作为 正则模块\n正则模块.匹配(\"\\d+\", \"a123b\")");
+        parse_program("导入 \"库/正则\" 作为 正则模块\n正则模块.匹配(\"\\d+\", \"a123b\")");
     assert!(errors.is_empty(), "解析错误：{errors}");
     let mut interp = Interpreter::new();
     interp.env.borrow_mut().set_base_dir(sdk());
@@ -340,6 +347,6 @@ fn 正则模块登记了实现来源() {
         .source_of("regex")
         .expect("regex 未登记实现来源");
     // 无论哪一档实现，结果都必须正确
-    let out = run("导入 \"正则\" 作为 正则模块\n正则模块.匹配(\"\\d+\", \"a123b\")").unwrap();
+    let out = run("导入 \"库/正则\" 作为 正则模块\n正则模块.匹配(\"\\d+\", \"a123b\")").unwrap();
     assert_eq!(out.inspect(), "(真, 空)", "实现来源：{}", source);
 }
