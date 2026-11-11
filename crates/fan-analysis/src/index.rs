@@ -65,6 +65,21 @@ impl Index {
         self.docs.values().find(|d| d.uri == uri)
     }
 
+    /// 遍历索引内全部文档（入口文档在前）。
+    pub fn all_docs(&self) -> impl Iterator<Item = &Document> {
+        self.docs.values()
+    }
+
+    /// 在任意文档中按模型名查找模型符号。
+    pub fn lookup_class_any_doc(&self, name: &str) -> Option<&crate::symbol::Symbol> {
+        for doc in self.docs.values() {
+            if let Some(sym) = doc.class(name) {
+                return Some(sym);
+            }
+        }
+        None
+    }
+
     /// 解析导入路径为实际文件绝对路径；找不到返回 `None`。
     pub fn resolve(&self, import_path: &str) -> Option<String> {
         let candidates = candidate_paths(import_path);

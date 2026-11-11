@@ -11,6 +11,12 @@
 pub mod diagnostic;
 /// 内建名字与类型关键字集合。
 pub mod builtins;
+/// 静态诊断检查（导入、未定义名）。
+pub mod check;
+/// 模型复合字面量检查。
+pub mod compositecheck;
+/// 同层嵌入歧义检查。
+pub mod embedcheck;
 /// 单文件静态视图：符号收集、文档注释、函数范围。
 pub mod document;
 /// 跨文件符号索引（静态解析导入）。
