@@ -19,11 +19,7 @@ pub fn analyze(source: &str) -> Vec<Diagnostic> {
 pub fn analyze_index(index: &Index) -> Vec<Diagnostic> {
     let source = &index.root().source;
     let (prog, errors) = parse_program(source);
-    let mut diags: Vec<Diagnostic> = errors
-        .0
-        .iter()
-        .map(Diagnostic::from_parse_error)
-        .collect();
+    let mut diags: Vec<Diagnostic> = errors.0.iter().map(Diagnostic::from_parse_error).collect();
 
     if prog.statements.is_empty() && !errors.is_empty() {
         return diags;
@@ -41,11 +37,7 @@ pub fn analyze_index(index: &Index) -> Vec<Diagnostic> {
 /// 仅把解析错误转成诊断，便于编辑器在其它检查关闭时使用。
 pub fn syntax_diagnostics(source: &str) -> Vec<Diagnostic> {
     let (_prog, errors) = parse_program(source);
-    errors
-        .0
-        .iter()
-        .map(Diagnostic::from_parse_error)
-        .collect()
+    errors.0.iter().map(Diagnostic::from_parse_error).collect()
 }
 
 /// 解析错误以外的诊断都不是 Error 级；提供一个便捷的严重级别判定。

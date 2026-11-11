@@ -254,9 +254,7 @@ fn to_completion_kind(kind: SymbolKind) -> i64 {
     match kind {
         SymbolKind::Function | SymbolKind::MixfixFunction => completion_kind::FUNCTION,
         SymbolKind::Method => completion_kind::METHOD,
-        SymbolKind::Class | SymbolKind::Interface | SymbolKind::Type => {
-            completion_kind::INTERFACE
-        }
+        SymbolKind::Class | SymbolKind::Interface | SymbolKind::Type => completion_kind::INTERFACE,
         SymbolKind::Field => completion_kind::FIELD,
         SymbolKind::Variable | SymbolKind::Parameter => completion_kind::VARIABLE,
         SymbolKind::Constant => completion_kind::CONSTANT,
@@ -327,10 +325,20 @@ impl Server {
     }
 
     fn on_did_open(&self, params: &Value) {
-        let Some(td) = params.get("textDocument") else { return };
-        let uri = td.get("uri").and_then(Value::as_str).unwrap_or("").to_string();
+        let Some(td) = params.get("textDocument") else {
+            return;
+        };
+        let uri = td
+            .get("uri")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let version = td.get("version").and_then(Value::as_i64).unwrap_or(0);
-        let text = td.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+        let text = td
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         self.set_document(&uri, version, &text);
         // didOpen 同步推送一次诊断。
         if let Some(writer) = &self.writer {
@@ -339,14 +347,24 @@ impl Server {
     }
 
     fn on_did_change(&self, params: &Value) {
-        let Some(td) = params.get("textDocument") else { return };
-        let uri = td.get("uri").and_then(Value::as_str).unwrap_or("").to_string();
+        let Some(td) = params.get("textDocument") else {
+            return;
+        };
+        let uri = td
+            .get("uri")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let version = td.get("version").and_then(Value::as_i64).unwrap_or(0);
         let Some(changes) = params.get("contentChanges").and_then(Value::as_array) else {
             return;
         };
         let Some(last) = changes.last() else { return };
-        let text = last.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+        let text = last
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         self.set_document(&uri, version, &text);
         self.schedule_publish(&uri, version);
     }
@@ -442,7 +460,10 @@ impl Server {
                 .collect();
             json!({ "isIncomplete": false, "items": items })
         });
-        let _ = self.respond(id, result.unwrap_or_else(|| json!({ "isIncomplete": false, "items": [] })));
+        let _ = self.respond(
+            id,
+            result.unwrap_or_else(|| json!({ "isIncomplete": false, "items": [] })),
+        );
     }
 
     fn set_document(&self, uri: &str, version: i64, text: &str) {
@@ -498,7 +519,11 @@ mod tests {
         }
         msg.insert("params".to_string(), params);
         let body = serde_json::to_vec(&Value::Object(msg)).unwrap();
-        format!("Content-Length: {}\r\n\r\n{}", body.len(), String::from_utf8(body).unwrap())
+        format!(
+            "Content-Length: {}\r\n\r\n{}",
+            body.len(),
+            String::from_utf8(body).unwrap()
+        )
     }
 
     /// 从分帧输出中解析出全部 JSON 消息体。
@@ -516,7 +541,11 @@ mod tests {
     fn initialize_与_did_open_推送诊断() {
         let source = "函数 修改(字符串 值)的状态为(字符串 状态) -> 字符串\n    返回 值\n结束\n\n变量 x = 修改(\"x\") 的状态为(\"y\")\n";
         let mut input = String::new();
-        input.push_str(&frame("initialize", Some(json!(1)), json!({ "capabilities": {} })));
+        input.push_str(&frame(
+            "initialize",
+            Some(json!(1)),
+            json!({ "capabilities": {} }),
+        ));
         input.push_str(&frame("initialized", None, json!({})));
         input.push_str(&frame(
             "textDocument/didOpen",
@@ -534,7 +563,9 @@ mod tests {
         let data = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         let frames = read_frames(&data);
 
-        let got_init = frames.iter().any(|m| m.get("id") == Some(&json!(1)) && m.get("error").is_none());
+        let got_init = frames
+            .iter()
+            .any(|m| m.get("id") == Some(&json!(1)) && m.get("error").is_none());
         assert!(got_init, "未收到 initialize 成功响应：{data}");
 
         let got_mixfix = frames.iter().any(|m| {
@@ -573,8 +604,15 @@ mod tests {
             .iter()
             .find(|m| m.get("id") == Some(&json!(2)))
             .expect("未收到 hover 响应");
-        let value = hover.get("result").and_then(|r| r.pointer("/contents/value")).map(|v| v.to_string()).unwrap_or_default();
-        assert!(value.contains("打招呼函数") && value.contains("打招呼"), "实际：{value}");
+        let value = hover
+            .get("result")
+            .and_then(|r| r.pointer("/contents/value"))
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        assert!(
+            value.contains("打招呼函数") && value.contains("打招呼"),
+            "实际：{value}"
+        );
     }
 
     #[test]
@@ -602,11 +640,20 @@ mod tests {
         }
         let data = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         let frames = read_frames(&data);
-        let hover = frames.iter().find(|m| m.get("id") == Some(&json!(2))).expect("未收到 hover 响应");
-        assert_eq!(hover.get("result"), Some(&Value::Null), "无符号处应返回 null");
-        assert!(data.contains("\"result\":null"), "响应必须显式包含 result:null：{data}");
+        let hover = frames
+            .iter()
+            .find(|m| m.get("id") == Some(&json!(2)))
+            .expect("未收到 hover 响应");
+        assert_eq!(
+            hover.get("result"),
+            Some(&Value::Null),
+            "无符号处应返回 null"
+        );
+        assert!(
+            data.contains("\"result\":null"),
+            "响应必须显式包含 result:null：{data}"
+        );
     }
-
 
     #[test]
     fn did_change_防抖后推送诊断() {
@@ -638,8 +685,13 @@ mod tests {
         // 等待防抖推送（250ms + 余量），再发 exit 让服务器干净退出。
         std::thread::sleep(Duration::from_millis(450));
         let data = String::from_utf8(output.lock().unwrap().clone()).unwrap();
-        assert!(data.contains("mixfix-space"), "didChange 防抖后应推送诊断：{data}");
-        pipe_w.write_all(frame("exit", None, Value::Null).as_bytes()).unwrap();
+        assert!(
+            data.contains("mixfix-space"),
+            "didChange 防抖后应推送诊断：{data}"
+        );
+        pipe_w
+            .write_all(frame("exit", None, Value::Null).as_bytes())
+            .unwrap();
         drop(pipe_w);
         handle.join().unwrap();
     }
@@ -669,18 +721,34 @@ mod tests {
         }
         let data = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         let frames = read_frames(&data);
-        let comp = frames.iter().find(|m| m.get("id") == Some(&json!(3))).expect("未收到 completion 响应");
-        let labels = comp.pointer("/result/items").and_then(Value::as_array).map(|a| {
-            a.iter().filter_map(|i| i.get("label").and_then(Value::as_str).map(str::to_string)).collect::<Vec<_>>()
-        }).unwrap_or_default();
+        let comp = frames
+            .iter()
+            .find(|m| m.get("id") == Some(&json!(3)))
+            .expect("未收到 completion 响应");
+        let labels = comp
+            .pointer("/result/items")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|i| i.get("label").and_then(Value::as_str).map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         assert!(labels.contains(&"打招呼".to_string()), "实际：{labels:?}");
-        assert!(labels.contains(&"函数".to_string()), "应包含关键字：{labels:?}");
+        assert!(
+            labels.contains(&"函数".to_string()),
+            "应包含关键字：{labels:?}"
+        );
     }
 
     #[test]
     fn 未知方法回_method_not_found() {
         let mut input = String::new();
-        input.push_str(&frame("textDocument/doesNotExist", Some(json!(7)), json!({})));
+        input.push_str(&frame(
+            "textDocument/doesNotExist",
+            Some(json!(7)),
+            json!({}),
+        ));
         input.push_str(&frame("exit", None, Value::Null));
 
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -691,7 +759,10 @@ mod tests {
         }
         let data = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         let frames = read_frames(&data);
-        let err = frames.iter().find(|m| m.get("id") == Some(&json!(7))).expect("未收到响应");
+        let err = frames
+            .iter()
+            .find(|m| m.get("id") == Some(&json!(7)))
+            .expect("未收到响应");
         assert_eq!(err.pointer("/error/code"), Some(&json!(-32601)));
     }
 

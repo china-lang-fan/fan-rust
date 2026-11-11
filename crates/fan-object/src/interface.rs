@@ -323,7 +323,13 @@ mod tests {
     }
 
     fn function(params: Vec<Parameter>, returns: Vec<DeclType>) -> Function {
-        let mut f = Function::new("处理", Vec::new(), BlockStmt::default(), None, Position::START);
+        let mut f = Function::new(
+            "处理",
+            Vec::new(),
+            BlockStmt::default(),
+            None,
+            Position::START,
+        );
         f.params = params;
         f.return_types = returns;
         f
@@ -340,8 +346,7 @@ mod tests {
             vec![param("内容", DeclType::named("整数"))],
             vec![DeclType::named("字符串")],
         )]);
-        let (method, reason) =
-            interface_missing_method(&iface, &value, &env()).expect("应不满足");
+        let (method, reason) = interface_missing_method(&iface, &value, &env()).expect("应不满足");
         assert_eq!(method, "处理");
         assert!(reason.contains("类型不符"), "实际原因：{reason}");
     }
@@ -404,7 +409,11 @@ mod tests {
 
     #[test]
     fn 接口未标注的类型项不约束() {
-        let iface = iface_with(vec![sig("处理", vec![param("a", DeclType::any())], Vec::new())]);
+        let iface = iface_with(vec![sig(
+            "处理",
+            vec![param("a", DeclType::any())],
+            Vec::new(),
+        )]);
         let value = model_with(vec![function(
             vec![param("a", DeclType::named("整数"))],
             Vec::new(),
@@ -415,18 +424,14 @@ mod tests {
     #[test]
     fn 空值满足任何接口() {
         let iface = iface_with(vec![sig("处理", Vec::new(), Vec::new())]);
-        assert_eq!(
-            interface_missing_method(&iface, &Object::Nil, &env()),
-            None
-        );
+        assert_eq!(interface_missing_method(&iface, &Object::Nil, &env()), None);
     }
 
     #[test]
     fn 缺少方法时返回缺少原因() {
         let iface = iface_with(vec![sig("处理", Vec::new(), Vec::new())]);
         let value = model_with(Vec::new());
-        let (method, reason) =
-            interface_missing_method(&iface, &value, &env()).expect("应不满足");
+        let (method, reason) = interface_missing_method(&iface, &value, &env()).expect("应不满足");
         assert_eq!(method, "处理");
         assert_eq!(reason, "缺少");
     }

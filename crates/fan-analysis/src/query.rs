@@ -43,12 +43,59 @@ pub struct CompletionItem {
 
 /// 补全列表里的关键字（Go 版 CompletionKeywords 对应物）。
 pub const COMPLETION_KEYWORDS: &[&str] = &[
-    "函数", "变量", "常量", "返回", "如果", "那么", "否则如果", "否则", "结束",
-    "当", "循环", "重复", "直到", "遍历", "中的", "跳出", "继续",
-    "判断", "其他", "模型", "接口", "类型", "嵌入", "方法", "自己",
-    "导入", "公开", "私有", "通过", "作为", "稍后", "抛出", "检查", "捕获",
-    "是", "转为", "位与", "位或", "异或", "位取反", "左移", "右移",
-    "整数", "小数", "字符串", "布尔", "数组", "字典", "字节", "字符", "真", "假", "空",
+    "函数",
+    "变量",
+    "常量",
+    "返回",
+    "如果",
+    "那么",
+    "否则如果",
+    "否则",
+    "结束",
+    "当",
+    "循环",
+    "重复",
+    "直到",
+    "遍历",
+    "中的",
+    "跳出",
+    "继续",
+    "判断",
+    "其他",
+    "模型",
+    "接口",
+    "类型",
+    "嵌入",
+    "方法",
+    "自己",
+    "导入",
+    "公开",
+    "私有",
+    "通过",
+    "作为",
+    "稍后",
+    "抛出",
+    "检查",
+    "捕获",
+    "是",
+    "转为",
+    "位与",
+    "位或",
+    "异或",
+    "位取反",
+    "左移",
+    "右移",
+    "整数",
+    "小数",
+    "字符串",
+    "布尔",
+    "数组",
+    "字典",
+    "字节",
+    "字符",
+    "真",
+    "假",
+    "空",
 ];
 
 /// 关键字补全使用的占位种类。
@@ -65,14 +112,23 @@ impl Index {
         }
         let range = word_range(line, line0, &word);
         if let Some(sym) = self.lookup_root(&word.text) {
-            return Some(HoverResult { content: format_hover(sym), range });
+            return Some(HoverResult {
+                content: format_hover(sym),
+                range,
+            });
         }
         if let Some(sym) = self.mixfix_symbol_at(line, &word.text) {
-            return Some(HoverResult { content: format_hover(sym), range });
+            return Some(HoverResult {
+                content: format_hover(sym),
+                range,
+            });
         }
         if let Some((owner, member)) = self.member_at(doc, line0, word.start_col) {
             if let Some((_uri, sym)) = self.lookup_member(&owner, &member) {
-                return Some(HoverResult { content: format_hover(sym), range });
+                return Some(HoverResult {
+                    content: format_hover(sym),
+                    range,
+                });
             }
         }
         None
@@ -87,10 +143,16 @@ impl Index {
             return None;
         }
         if let Some(sym) = self.lookup_root(&word.text) {
-            return Some(Location { uri: doc.uri.clone(), range: name_range(doc, &sym.name, sym.pos) });
+            return Some(Location {
+                uri: doc.uri.clone(),
+                range: name_range(doc, &sym.name, sym.pos),
+            });
         }
         if let Some(sym) = self.mixfix_symbol_at(line, &word.text) {
-            return Some(Location { uri: doc.uri.clone(), range: name_range(doc, &sym.name, sym.pos) });
+            return Some(Location {
+                uri: doc.uri.clone(),
+                range: name_range(doc, &sym.name, sym.pos),
+            });
         }
         if let Some((owner, member)) = self.member_at(doc, line0, word.start_col) {
             return self.member_definition(&owner, &member);
@@ -156,7 +218,10 @@ impl Index {
     fn member_definition(&self, owner: &str, member: &str) -> Option<Location> {
         let (uri, sym) = self.lookup_member(owner, member)?;
         let doc = self.document(&uri)?;
-        Some(Location { uri, range: name_range(doc, &sym.name, sym.pos) })
+        Some(Location {
+            uri,
+            range: name_range(doc, &sym.name, sym.pos),
+        })
     }
 
     /// 判断光标词是否为 `对象.成员` / `对象 的 成员` 的右半部分。
@@ -186,7 +251,10 @@ impl Index {
         if runes[i as usize] == '.' {
             connector_len = 1isize;
         } else if i >= 2
-            && runes[(i - 2) as usize..=i as usize].iter().collect::<String>() == "的"
+            && runes[(i - 2) as usize..=i as usize]
+                .iter()
+                .collect::<String>()
+                == "的"
         {
             connector_len = 3;
         } else {
@@ -395,8 +463,14 @@ impl Index {
 
 fn word_range(line: &str, line0: usize, word: &WordMatch) -> Range {
     Range {
-        start: Position { line: line0, character: utf16_column(line, word.start_col) },
-        end: Position { line: line0, character: utf16_column(line, word.end_col) },
+        start: Position {
+            line: line0,
+            character: utf16_column(line, word.start_col),
+        },
+        end: Position {
+            line: line0,
+            character: utf16_column(line, word.end_col),
+        },
     }
 }
 
@@ -408,7 +482,10 @@ fn name_range(doc: &Document, name: &str, fallback: fan_ast::Position) -> Range 
         .map(|byte_idx| line[..byte_idx].chars().count() + 1)
         .unwrap_or(fallback.column);
     Range {
-        start: Position { line: fallback.line - 1, character: utf16_column(line, col) },
+        start: Position {
+            line: fallback.line - 1,
+            character: utf16_column(line, col),
+        },
         end: Position {
             line: fallback.line - 1,
             character: utf16_column(line, col + name.chars().count()),
@@ -447,7 +524,12 @@ fn completion_owner(line: &str, char16: usize) -> Option<String> {
     }
     if runes[i as usize] == '.' {
         // 继续向左取标识符
-    } else if i >= 2 && runes[(i - 2) as usize..=i as usize].iter().collect::<String>() == "的" {
+    } else if i >= 2
+        && runes[(i - 2) as usize..=i as usize]
+            .iter()
+            .collect::<String>()
+            == "的"
+    {
         i -= 2;
     } else {
         return None;
@@ -507,7 +589,9 @@ fn format_hover(sym: &Symbol) -> String {
     let mut out = String::new();
     if !sym.detail.is_empty() {
         let head = match sym.kind {
-            SymbolKind::Field | SymbolKind::Variable | SymbolKind::Constant
+            SymbolKind::Field
+            | SymbolKind::Variable
+            | SymbolKind::Constant
             | SymbolKind::Parameter => format!("{}: {}", sym.name, sym.detail),
             _ => sym.detail.clone(),
         };
@@ -573,7 +657,11 @@ mod tests {
     #[test]
     fn 根补全包含符号与关键字() {
         let index = Index::build("file:///t.凡", SRC);
-        let labels: Vec<String> = index.completion(0, 0).into_iter().map(|i| i.label).collect();
+        let labels: Vec<String> = index
+            .completion(0, 0)
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
         assert!(labels.contains(&"打招呼".to_string()));
         assert!(labels.contains(&"矩形".to_string()));
         assert!(labels.contains(&"函数".to_string()));
@@ -593,7 +681,8 @@ mod tests {
     #[test]
     fn 复合字面量字段补全识别模型() {
         let line = "变量 r = 矩形{宽";
-        let model = composite_field_completion_model(line, line.chars().count()).expect("应识别模型");
+        let model =
+            composite_field_completion_model(line, line.chars().count()).expect("应识别模型");
         assert_eq!(model, "矩形");
     }
 }

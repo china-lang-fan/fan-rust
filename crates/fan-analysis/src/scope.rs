@@ -170,7 +170,13 @@ fn visit_for_each(
 ) {
     visit_expr(&f.iterable, scopes, result, owner);
     scopes.push(HashMap::new());
-    declare(scopes, &f.first_name, DeclType::any(), SymbolKind::Variable, f.pos);
+    declare(
+        scopes,
+        &f.first_name,
+        DeclType::any(),
+        SymbolKind::Variable,
+        f.pos,
+    );
     if let Some(second) = &f.second_name {
         declare(scopes, second, DeclType::any(), SymbolKind::Variable, f.pos);
     }
@@ -241,17 +247,13 @@ mod tests {
 
     #[test]
     fn 参数与自己在函数体内可见() {
-        let (prog, _) = parse_program(
-            "函数 甲(整数 入参) -> 整数\n    返回 入参 加 自己.值\n结束\n",
-        );
+        let (prog, _) =
+            parse_program("函数 甲(整数 入参) -> 整数\n    返回 入参 加 自己.值\n结束\n");
         let f = first_function(&prog);
         let scopes = collect_local_scopes(f);
         // 返回语句中的两个标识符都应能看到参数/自己
         assert!(!scopes.is_empty());
-        let all: HashSet<&String> = scopes
-            .values()
-            .flat_map(|m| m.keys())
-            .collect();
+        let all: HashSet<&String> = scopes.values().flat_map(|m| m.keys()).collect();
         assert!(all.contains(&"入参".to_string()));
         assert!(all.contains(&"自己".to_string()));
     }
@@ -275,8 +277,9 @@ mod tests {
 
     #[test]
     fn 遍历变量被登记为局部名字() {
-        let (prog, _) =
-            parse_program("函数 甲(数组 名单)\n    遍历 名单 中的 项\n        打印(项)\n    结束\n结束\n");
+        let (prog, _) = parse_program(
+            "函数 甲(数组 名单)\n    遍历 名单 中的 项\n        打印(项)\n    结束\n结束\n",
+        );
         let f = first_function(&prog);
         let scopes = collect_local_scopes(f);
         let all: HashSet<&String> = scopes.values().flat_map(|m| m.keys()).collect();

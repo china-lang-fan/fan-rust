@@ -334,10 +334,8 @@ mod tests {
     #[test]
     fn lsp服务器在空输入上干净退出() {
         // stdin 立即 EOF（无消息）时服务器应正常返回而非报错。
-        let result = fan_lsp::Server::new().run(
-            &mut std::io::Cursor::new(Vec::new()),
-            Vec::<u8>::new(),
-        );
+        let result =
+            fan_lsp::Server::new().run(&mut std::io::Cursor::new(Vec::new()), Vec::<u8>::new());
         assert!(result.is_ok(), "空输入应正常结束：{result:?}");
     }
 }

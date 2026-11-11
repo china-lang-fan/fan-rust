@@ -202,9 +202,7 @@ impl Runtime {
             .entry(type_name.to_string())
             .or_default();
         if table.contains_key(method) {
-            return Err(format!(
-                "类型 {type_name} 上的扩展方法 {method} 重复定义"
-            ));
+            return Err(format!("类型 {type_name} 上的扩展方法 {method} 重复定义"));
         }
         table.insert(method.to_string(), func);
         Ok(())
@@ -252,10 +250,7 @@ impl Runtime {
 
     /// 按根段名与运行时签名查找分段函数。
     pub fn lookup_mixfix(&self, root: &str, signature: &str) -> Option<Rc<Function>> {
-        self.mixfix_functions
-            .get(root)?
-            .get(signature)
-            .cloned()
+        self.mixfix_functions.get(root)?.get(signature).cloned()
     }
 
     /// 在指定环境内查找模型（内建模型优先，其次是环境中的模型值）。

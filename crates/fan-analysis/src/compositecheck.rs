@@ -28,8 +28,7 @@ impl Index {
                 if sym.kind != crate::symbol::SymbolKind::Class {
                     continue;
                 }
-                let info: &mut ClassStaticInfo =
-                    infos.entry(sym.name.clone()).or_default();
+                let info: &mut ClassStaticInfo = infos.entry(sym.name.clone()).or_default();
                 info.embeds = sym.embeds.clone();
                 for child in &sym.children {
                     match child.kind {
@@ -146,15 +145,22 @@ mod tests {
         let src = "模型 矩形\n    属性 整数 宽\n结束\n变量 a = 矩形{宽: 1, 高: 2}\n变量 b = 圆形{半径: 1}\n";
         let index = Index::build("file:///t.凡", src);
         let diags = index.check_composite_literals();
-        assert!(codes(&diags).contains(&"composite-unknown-field".to_string()), "{diags:?}");
-        assert!(codes(&diags).contains(&"composite-unknown-model".to_string()), "{diags:?}");
+        assert!(
+            codes(&diags).contains(&"composite-unknown-field".to_string()),
+            "{diags:?}"
+        );
+        assert!(
+            codes(&diags).contains(&"composite-unknown-model".to_string()),
+            "{diags:?}"
+        );
     }
 
     #[test]
     fn 合法复合字面量不报错() {
         // 注：同字段重复在解析期已被 parser 以 syntax 错误拒绝，
         // analysis 的重复分支仅作防御性兜底，正常解析路径不会到达。
-        let ok_src = "模型 矩形\n    属性 整数 宽\n    属性 整数 高\n结束\n变量 a = 矩形{宽: 1, 高: 2}\n";
+        let ok_src =
+            "模型 矩形\n    属性 整数 宽\n    属性 整数 高\n结束\n变量 a = 矩形{宽: 1, 高: 2}\n";
         let ok = Index::build("file:///t.凡", ok_src).check_composite_literals();
         assert!(ok.is_empty(), "合法字面量不应报错：{ok:?}");
     }

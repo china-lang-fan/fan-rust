@@ -37,11 +37,7 @@ impl Index {
     }
 
     /// 仅对类型明确的接收者表达式返回模型名，否则空串。
-    fn static_owner_type(
-        &self,
-        expr: &Expr,
-        infos: &ClassInfoMap,
-    ) -> String {
+    fn static_owner_type(&self, expr: &Expr, infos: &ClassInfoMap) -> String {
         match expr {
             // 模型构造调用 模型(...)
             Expr::Call(call) => {
@@ -142,9 +138,7 @@ fn report(
             end_column: pos.column + owner.chars().count(),
             severity: Severity::Error,
             code: "embed-ambiguous".to_string(),
-            message: format!(
-                "{owner} 的成员 {name} 在同层嵌入中有歧义，应用 嵌入名.{name} 限定"
-            ),
+            message: format!("{owner} 的成员 {name} 在同层嵌入中有歧义，应用 嵌入名.{name} 限定"),
         });
     }
 }
@@ -180,12 +174,7 @@ fn ambiguous_member(
 }
 
 /// 沿嵌入链判断成员是否存在（含深层嵌入）。
-fn member_exists(
-    infos: &ClassInfoMap,
-    info: &ClassStaticInfo,
-    name: &str,
-    field: bool,
-) -> bool {
+fn member_exists(infos: &ClassInfoMap, info: &ClassStaticInfo, name: &str, field: bool) -> bool {
     let own = if field {
         info.fields.contains(name)
     } else {

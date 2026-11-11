@@ -204,7 +204,11 @@ mod tests {
         let dir = std::env::temp_dir().join("fan_analysis_index_test");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("工具.凡"), "函数 帮助() -> 整数\n    返回 1\n结束\n").unwrap();
+        fs::write(
+            dir.join("工具.凡"),
+            "函数 帮助() -> 整数\n    返回 1\n结束\n",
+        )
+        .unwrap();
         let entry = dir.join("主.凡");
         let source = "导入 \"工具\" 作为 工具模块\n变量 x = 1\n";
         let index = Index::build(&path_to_uri(&entry.to_string_lossy()), source);

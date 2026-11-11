@@ -20,9 +20,8 @@ pub use expr::{
     ArrayLit, BinaryExpr, BoolLit, CallExpr, CharLit, CheckExpr, CompositeField, CompositeLit,
     DictLit, DictPair, Expr, FloatLit, FunctionLit, Ident, ImplicitReceiverCallExpr, IndexExpr,
     IntegerLit, InterpString, MaybeCallExpr, MemberExpr, NamedTagArg, NativeDecl, NilLit,
-    Parameter, SliceExpr,
-    SpreadExpr, StringLit, TagExpr, TernaryExpr, ThroughExpr, TupleExpr, TypeCastExpr,
-    TypeTestExpr, UnaryExpr, UpdateExpr,
+    Parameter, SliceExpr, SpreadExpr, StringLit, TagExpr, TernaryExpr, ThroughExpr, TupleExpr,
+    TypeCastExpr, TypeTestExpr, UnaryExpr, UpdateExpr,
 };
 pub use position::Position;
 pub use stmt::{

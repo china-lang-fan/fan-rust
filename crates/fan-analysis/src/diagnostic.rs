@@ -53,6 +53,12 @@ impl Diagnostic {
 
     /// 把解析错误转换为 `syntax` 诊断。
     pub fn from_parse_error(e: &ParseError) -> Self {
-        Diagnostic::new(e.line, e.column, Severity::Error, "syntax", e.message.clone())
+        Diagnostic::new(
+            e.line,
+            e.column,
+            Severity::Error,
+            "syntax",
+            e.message.clone(),
+        )
     }
 }

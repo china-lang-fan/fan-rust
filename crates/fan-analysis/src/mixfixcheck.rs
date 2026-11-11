@@ -57,7 +57,9 @@ fn collect_mixfix_defs(prog: &Program) -> MixfixRegistry {
             other => other,
         };
         let Stmt::VarDecl(v) = inner else { continue };
-        let Some(Expr::Function(f)) = &v.value else { continue };
+        let Some(Expr::Function(f)) = &v.value else {
+            continue;
+        };
         if !f.is_segmented() {
             continue;
         }
@@ -131,7 +133,9 @@ fn collect_chain(mut current: &Expr) -> Option<Chain> {
             _ => break,
         }
     }
-    let Expr::Ident(id) = current else { return None };
+    let Expr::Ident(id) = current else {
+        return None;
+    };
     if outward.is_empty() {
         return None;
     }
@@ -157,7 +161,9 @@ pub fn check_mixfix_spacing(prog: &Program) -> Vec<Diagnostic> {
     let registry = collect_mixfix_defs(prog);
     let mut diags = Vec::new();
     walk_with_parents(NodeRef::Program(prog), |node, parent| {
-        let Some(expr) = node.as_expr() else { return true };
+        let Some(expr) = node.as_expr() else {
+            return true;
+        };
 
         // 紧邻的分段调用在 parser 中被压成扁平 Call（callee 为拼接名 Ident，
         // 并带 mixfix_root）；此时没有空格问题，只需校验能否匹配到定义。
@@ -185,7 +191,9 @@ pub fn check_mixfix_spacing(prog: &Program) -> Vec<Diagnostic> {
             }
         }
 
-        let Some(chain) = collect_chain(expr) else { return true };
+        let Some(chain) = collect_chain(expr) else {
+            return true;
+        };
         if !registry.has_root(&chain.root) {
             return true;
         }
@@ -275,8 +283,7 @@ mod tests {
 
     use super::*;
 
-    const DEF: &str =
-        "函数 修改(字符串 值)的状态为(字符串 状态) -> 字符串\n    返回 值\n结束\n";
+    const DEF: &str = "函数 修改(字符串 值)的状态为(字符串 状态) -> 字符串\n    返回 值\n结束\n";
 
     #[test]
     fn 段间带空格报mixfix_space() {

@@ -8,8 +8,8 @@ use crate::error::{value, EvalResult, FanError, Flow};
 use crate::operators;
 use fan_ast::{self as ast, BlockStmt, DeclType, Expr, Position, Program, Stmt, Visibility};
 use fan_object::{
-    check_decl_type, kind_display_name, runtime_type_name, Builtin, Environment, FanArray,
-    FanDict, Object, Runtime,
+    check_decl_type, kind_display_name, runtime_type_name, Builtin, Environment, FanArray, FanDict,
+    Object, Runtime,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -1371,7 +1371,10 @@ impl Interpreter {
         let val = self.eval_expr(&n.call)?;
         let val = match val {
             // 内层检查/抛出等控制流信号直接向上冒泡
-            signal @ (Flow::Return(_) | Flow::Break | Flow::Continue | Flow::Throw(_)
+            signal @ (Flow::Return(_)
+            | Flow::Break
+            | Flow::Continue
+            | Flow::Throw(_)
             | Flow::Check(_, _)) => return Ok(signal),
             Flow::Value(v) => v,
         };
@@ -1446,14 +1449,9 @@ impl Interpreter {
                 if param.variadic {
                     let rest = args.get(idx..).unwrap_or(&[]).to_vec();
                     for val in &rest {
-                        check_decl_type(&param.type_, val, &fn_env.borrow()).map_err(
-                            |reason| {
-                                FanError::at(
-                                    format!("参数 {} 类型不匹配：{}", param.name, reason),
-                                    pos,
-                                )
-                            },
-                        )?;
+                        check_decl_type(&param.type_, val, &fn_env.borrow()).map_err(|reason| {
+                            FanError::at(format!("参数 {} 类型不匹配：{}", param.name, reason), pos)
+                        })?;
                     }
                     bound.push((param.name.clone(), Object::array(rest), param.type_.clone()));
                     break;
@@ -1465,21 +1463,15 @@ impl Interpreter {
                     }
                     None => match &param.default {
                         Some(expr) => {
-                            let mut sub = Interpreter::with_env(
-                                self,
-                                fn_env.clone(),
-                                self.loader.clone(),
-                            );
+                            let mut sub =
+                                Interpreter::with_env(self, fn_env.clone(), self.loader.clone());
                             sub.eval_expr(expr)?.into_value()?
                         }
                         None => Object::Nil,
                     },
                 };
                 check_decl_type(&param.type_, &value, &fn_env.borrow()).map_err(|reason| {
-                    FanError::at(
-                        format!("参数 {} 类型不匹配：{}", param.name, reason),
-                        pos,
-                    )
+                    FanError::at(format!("参数 {} 类型不匹配：{}", param.name, reason), pos)
                 })?;
                 bound.push((param.name.clone(), value, param.type_.clone()));
             }
@@ -1678,11 +1670,7 @@ fn mixfix_type_label(value: &Object) -> String {
 ///
 /// 形如 `修改(整数)的状态为(字符串)`，与 parser 的 `build_mixfix_signature`
 /// 产出同构，只是类型标签来自实参而非声明。
-fn build_runtime_mixfix_signature(
-    root: &str,
-    args: &[Object],
-    env: &Environment,
-) -> String {
+fn build_runtime_mixfix_signature(root: &str, args: &[Object], env: &Environment) -> String {
     // 从注册表中取出该 root 下任一已登记函数，借它的分段结构（段名/连接词/分组大小）。
     let rt = env.runtime();
     let rt_ref = rt.borrow();
@@ -1715,7 +1703,8 @@ fn build_runtime_mixfix_signature(
     out
 }
 
-pub(crate) fn single_or_tuple(values: Vec<Object>) -> Object {    match values.len() {
+pub(crate) fn single_or_tuple(values: Vec<Object>) -> Object {
+    match values.len() {
         0 => Object::Nil,
         1 => values.into_iter().next().unwrap(),
         _ => Object::tuple(values),
@@ -1770,10 +1759,7 @@ fn coerce_return_values(
         ));
     }
     for (i, dt) in types.iter().enumerate() {
-        let v = values
-            .get(i)
-            .cloned()
-            .unwrap_or(Object::Nil);
+        let v = values.get(i).cloned().unwrap_or(Object::Nil);
         if matches!(v, Object::Nil) && dt.0 == "错误" {
             continue;
         }
@@ -2130,25 +2116,21 @@ mod tests {
 
     #[test]
     fn 同签名分段函数重复定义报错() {
-        let err = run(
-            "函数 修改(字符串 值)的状态为(字符串 状态) -> 字符串\n\
+        let err = run("函数 修改(字符串 值)的状态为(字符串 状态) -> 字符串\n\
                  返回 \"一\"\n\
              结束\n\
              函数 修改(字符串 值)的状态为(字符串 状态) -> 字符串\n\
                  返回 \"二\"\n\
              结束\n\
-             修改(\"x\")的状态为(\"a\")",
-        )
+             修改(\"x\")的状态为(\"a\")")
         .unwrap_err();
         assert!(err.contains("重复的分段函数签名"), "实际：{err}");
     }
 
     #[test]
     fn 普通函数同名重复定义报错() {
-        let err = run(
-            "函数 甲() -> 整数\n    返回 1\n结束\n\
-             函数 甲() -> 整数\n    返回 2\n结束\n甲()",
-        )
+        let err = run("函数 甲() -> 整数\n    返回 1\n结束\n\
+             函数 甲() -> 整数\n    返回 2\n结束\n甲()")
         .unwrap_err();
         assert!(err.contains("函数 甲 重复定义"), "实际：{err}");
     }
@@ -2206,12 +2188,10 @@ mod tests {
 
     #[test]
     fn 无匹配分段签名时报错() {
-        let err = run(
-            "函数 修改(字符串 值)的状态为(字符串 状态) -> 字符串\n\
+        let err = run("函数 修改(字符串 值)的状态为(字符串 状态) -> 字符串\n\
                  返回 \"字符串\"\n\
              结束\n\
-             修改(1)的状态为(\"a\")",
-        )
+             修改(1)的状态为(\"a\")")
         .unwrap_err();
         assert!(err.contains("找不到匹配的分段函数"), "实际：{err}");
     }
@@ -2231,8 +2211,7 @@ mod tests {
     #[test]
     fn 检查命中错误由当前函数接住() {
         // 安全除法声明了 (整数, 错误)，检查 命中后补零值并把错误作为正常返回
-        let res = run(
-            "函数 除法(整数 a, 整数 b) -> (整数, 错误)\n\
+        let res = run("函数 除法(整数 a, 整数 b) -> (整数, 错误)\n\
                  如果 b 等于 0 那么\n\
                      返回 0、错误(\"零\")\n\
                  结束\n\
@@ -2242,8 +2221,7 @@ mod tests {
                  返回 检查 除法(10, 0)\n\
              结束\n\
              变量 r、e = 安全除法()\n\
-             e",
-        )
+             e")
         .unwrap();
         match res {
             Object::Error(cell) => {
@@ -2255,8 +2233,7 @@ mod tests {
 
     #[test]
     fn 检查错误沿调用链传播并记录栈() {
-        let res = run(
-            "函数 底层() -> (字符串, 错误)\n\
+        let res = run("函数 底层() -> (字符串, 错误)\n\
                  返回 \"\"、错误(\"打不开\")\n\
              结束\n\
              函数 中层() -> (字符串, 错误)\n\
@@ -2266,8 +2243,7 @@ mod tests {
                  返回 检查 中层()\n\
              结束\n\
              变量 结果、e = 顶层()\n\
-             e",
-        )
+             e")
         .unwrap();
         match res {
             Object::Error(cell) => {
@@ -2283,16 +2259,14 @@ mod tests {
 
     #[test]
     fn 无错误返回类型时检查冒泡到顶层() {
-        let err = run(
-            "函数 坏() -> 错误\n\
+        let err = run("函数 坏() -> 错误\n\
                  返回 错误(\"炸了\")\n\
              结束\n\
              函数 上层() -> 整数\n\
                  变量 x = 检查 坏()\n\
                  返回 x\n\
              结束\n\
-             上层()",
-        )
+             上层()")
         .unwrap_err();
         assert!(err.contains("未捕获的检查错误"), "实际：{err}");
         assert!(err.contains("炸了"), "实际：{err}");
@@ -2300,8 +2274,7 @@ mod tests {
 
     #[test]
     fn 检查赋值语句同样冒泡() {
-        let err = run(
-            "函数 坏() -> 错误\n\
+        let err = run("函数 坏() -> 错误\n\
                  返回 错误(\"赋值路径\")\n\
              结束\n\
              函数 上层() -> 整数\n\
@@ -2309,12 +2282,10 @@ mod tests {
                  x = 检查 坏()\n\
                  返回 x\n\
              结束\n\
-             上层()",
-        )
+             上层()")
         .unwrap_err();
         assert!(err.contains("赋值路径"), "实际：{err}");
     }
-
 
     #[test]
     fn 段间有空白是调用后取字段() {
@@ -2834,8 +2805,8 @@ mod tests {
 
     #[test]
     fn 参数类型不符时报错() {
-        let err = run("函数 加一(整数 值) -> 整数\n    返回 值 加 1\n结束\n加一(\"文本\")")
-            .unwrap_err();
+        let err =
+            run("函数 加一(整数 值) -> 整数\n    返回 值 加 1\n结束\n加一(\"文本\")").unwrap_err();
         assert!(err.contains("参数 值 类型不匹配"), "实际：{err}");
     }
 
@@ -2855,10 +2826,7 @@ mod tests {
 
     #[test]
     fn 返回值数量不符时报错() {
-        let err = run(
-            "函数 取值() -> (整数, 字符串)\n    返回 1\n结束\n取值()",
-        )
-        .unwrap_err();
+        let err = run("函数 取值() -> (整数, 字符串)\n    返回 1\n结束\n取值()").unwrap_err();
         assert!(err.contains("返回值数量不符"), "实际：{err}");
     }
 
@@ -2882,23 +2850,18 @@ mod tests {
             "函数 拆分() -> (整数, 字符串)\n    返回 1, \"甲\"\n结束\n变量 a、b = 拆分()\na",
             "1",
         );
-        let err = run(
-            "函数 拆分() -> (整数, 字符串)\n    返回 1, 2\n结束\n拆分()",
-        )
-        .unwrap_err();
+        let err = run("函数 拆分() -> (整数, 字符串)\n    返回 1, 2\n结束\n拆分()").unwrap_err();
         assert!(err.contains("第 2 个返回值"), "实际：{err}");
     }
 
     #[test]
     fn 方法参数同样受类型约束() {
-        let err = run(
-            "定义 模型 计数器
+        let err = run("定义 模型 计数器
 结束
 定义 计数器 的 方法 增加(整数 步长) -> 整数
     返回 步长
 结束
-计数器().增加(\"x\")",
-        )
+计数器().增加(\"x\")")
         .unwrap_err();
         assert!(err.contains("参数 步长 类型不匹配"), "实际：{err}");
     }

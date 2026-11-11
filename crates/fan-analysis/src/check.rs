@@ -125,9 +125,7 @@ impl Document {
 }
 
 fn is_known(name: &str, globals: &HashSet<String>) -> bool {
-    globals.contains(name)
-        || soft_keywords().contains(name)
-        || builtin_names().contains(name)
+    globals.contains(name) || soft_keywords().contains(name) || builtin_names().contains(name)
 }
 
 fn undefined_diagnostic(id: &Ident) -> Diagnostic {
@@ -191,7 +189,6 @@ pub fn is_type_kind(kind: SymbolKind) -> bool {
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,7 +241,11 @@ mod tests {
         let dir = std::env::temp_dir().join("fan_analysis_check_test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("工具.凡"), "函数 帮助() -> 整数\n    返回 1\n结束\n").unwrap();
+        std::fs::write(
+            dir.join("工具.凡"),
+            "函数 帮助() -> 整数\n    返回 1\n结束\n",
+        )
+        .unwrap();
         let entry = dir.join("主.凡");
         let source = "导入 \"工具\" 作为 工具模块\n";
         let index = Index::build(&path_to_uri(&entry.to_string_lossy()), source);

@@ -20,11 +20,7 @@ impl<'a> NodeRef<'a> {
     /// 节点起始位置。
     pub fn pos(&self) -> Position {
         match self {
-            NodeRef::Program(p) => p
-                .statements
-                .first()
-                .map(|s| s.pos())
-                .unwrap_or_default(),
+            NodeRef::Program(p) => p.statements.first().map(|s| s.pos()).unwrap_or_default(),
             NodeRef::Stmt(s) => s.pos(),
             NodeRef::Expr(e) => e.pos(),
         }
@@ -293,7 +289,8 @@ mod tests {
 
     #[test]
     fn 遍历覆盖嵌套表达式与语句() {
-        let (prog, errors) = parse_program("变量 x = 1 加 2\n如果 x 大于 1 那么\n    打印(x)\n结束\n");
+        let (prog, errors) =
+            parse_program("变量 x = 1 加 2\n如果 x 大于 1 那么\n    打印(x)\n结束\n");
         assert!(errors.is_empty(), "解析错误：{errors:?}");
         let mut count = 0;
         let mut saw_call = false;

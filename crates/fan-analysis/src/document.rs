@@ -377,7 +377,11 @@ mod tests {
         assert_eq!(sym.name, "打招呼");
         assert_eq!(sym.kind, SymbolKind::Function);
         assert_eq!(sym.doc, "打招呼");
-        assert!(sym.detail.contains("打招呼(名字 字符串)"), "实际：{}", sym.detail);
+        assert!(
+            sym.detail.contains("打招呼(名字 字符串)"),
+            "实际：{}",
+            sym.detail
+        );
         assert_eq!(sym.children.len(), 1);
         assert_eq!(sym.children[0].kind, SymbolKind::Parameter);
     }

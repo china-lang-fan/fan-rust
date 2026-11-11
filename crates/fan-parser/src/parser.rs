@@ -169,7 +169,8 @@ impl Parser {
                     _ if is_type_token(self.cur.type_) && self.peek.type_ == TokenType::Member => {
                         self.parse_method_definition()
                     }
-                    _ => self.parse_var_decl(),                }
+                    _ => self.parse_var_decl(),
+                }
             }
             TokenType::Function => self.parse_function_statement(),
             TokenType::Return => self.parse_return_statement(),
@@ -3703,19 +3704,13 @@ mod tests {
     #[test]
     fn 旧参数语序直接报错() {
         let errs = parse_err("函数 甲(乙 整数)\n    返回 乙\n结束");
-        assert!(errs
-            .first_message()
-            .unwrap()
-            .contains("类型后应为参数名"));
+        assert!(errs.first_message().unwrap().contains("类型后应为参数名"));
     }
 
     #[test]
     fn 参数必须显式声明类型() {
         let errs = parse_err("函数 甲(乙)\n    返回 乙\n结束");
-        assert!(errs
-            .first_message()
-            .unwrap()
-            .contains("类型后应为参数名"));
+        assert!(errs.first_message().unwrap().contains("类型后应为参数名"));
     }
 
     #[test]
@@ -3733,10 +3728,7 @@ mod tests {
     #[test]
     fn 匿名联合不能直接作参数类型() {
         let errs = parse_err("函数 甲(整数 或 字符串 乙)\n    返回 乙\n结束");
-        assert!(errs
-            .first_message()
-            .unwrap()
-            .contains("不允许匿名联合类型"));
+        assert!(errs.first_message().unwrap().contains("不允许匿名联合类型"));
     }
 
     #[test]
@@ -3751,10 +3743,7 @@ mod tests {
     #[test]
     fn 默认值无法静态推断时报错() {
         let errs = parse_err("函数 甲(整数 乙 = 取数())\n    返回 乙\n结束");
-        assert!(errs
-            .first_message()
-            .unwrap()
-            .contains("无法静态推断类型"));
+        assert!(errs.first_message().unwrap().contains("无法静态推断类型"));
     }
 
     #[test]
@@ -3775,10 +3764,7 @@ mod tests {
     #[test]
     fn 模型体内变量关键字已移除() {
         let errs = parse_err("模型 甲\n    变量 整数 乙\n结束");
-        assert!(errs
-            .first_message()
-            .unwrap()
-            .contains("字段须用 属性 声明"));
+        assert!(errs.first_message().unwrap().contains("字段须用 属性 声明"));
     }
 
     #[test]
@@ -4195,10 +4181,7 @@ mod tests {
     #[test]
     fn 分段函数参数必须标注类型() {
         let errs = parse_err("函数 根(甲)的段(乙)\n    返回 1\n结束");
-        assert!(errs
-            .first_message()
-            .unwrap()
-            .contains("类型后应为参数名"));
+        assert!(errs.first_message().unwrap().contains("类型后应为参数名"));
     }
 
     #[test]

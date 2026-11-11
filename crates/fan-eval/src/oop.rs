@@ -111,10 +111,7 @@ impl Interpreter {
                 self.process_function_tags(&mut func)?;
                 if cls.methods.contains_key(&stmt.method_name) {
                     return Err(FanError::at(
-                        format!(
-                            "模型 {} 的方法 {} 重复定义",
-                            cls.name, stmt.method_name
-                        ),
+                        format!("模型 {} 的方法 {} 重复定义", cls.name, stmt.method_name),
                         stmt.pos,
                     ));
                 }
@@ -997,11 +994,9 @@ mod tests {
 
     #[test]
     fn 模型方法同名重复定义报错() {
-        let err = run(
-            "模型 点\n    属性 整数 x\n结束\n\
+        let err = run("模型 点\n    属性 整数 x\n结束\n\
              定义 点 的 方法 模() -> 整数\n    返回 自己.x\n结束\n\
-             定义 点 的 方法 模() -> 整数\n    返回 自己.x 乘 2\n结束\n",
-        )
+             定义 点 的 方法 模() -> 整数\n    返回 自己.x 乘 2\n结束\n")
         .unwrap_err();
         assert!(err.contains("模型 点 的方法 模 重复定义"), "实际：{err}");
     }
@@ -1492,14 +1487,12 @@ mod tests {
     fn 接口循环嵌入报错() {
         // 先定义 乙（嵌入稍后定义的 丙 会先报未定义），因此用自环与互环两种合法顺序：
         // 互环：甲 先定义并嵌入 乙；乙 后定义且嵌入 甲（甲此时已注册）。
-        let err = run(
-            "接口 甲
+        let err = run("接口 甲
     嵌入 乙
 结束
 接口 乙
     嵌入 甲
-结束",
-        )
+结束")
         .unwrap_err();
         // 甲 在前向引用 乙：要求嵌入接口先定义，故报未定义而非环。
         assert!(
@@ -1508,37 +1501,31 @@ mod tests {
         );
 
         // 自环：接口嵌入自身，定义时自身已注册，应明确报循环嵌入。
-        let err_self = run(
-            "接口 甲
+        let err_self = run("接口 甲
     嵌入 甲
-结束",
-        )
+结束")
         .unwrap_err();
         assert!(err_self.contains("循环嵌入"), "实际错误：{err_self}");
     }
 
     #[test]
     fn 嵌入未定义接口报错() {
-        let err = run(
-            "接口 甲
+        let err = run("接口 甲
     嵌入 不存在
-结束",
-        )
+结束")
         .unwrap_err();
         assert!(err.contains("未定义的接口"), "实际错误：{err}");
     }
 
     #[test]
     fn 嵌入同名方法签名冲突报错() {
-        let err = run(
-            "接口 甲
+        let err = run("接口 甲
     方法 处理(字符串 内容) -> 字符串
 结束
 接口 乙
     嵌入 甲
     方法 处理(整数 内容) -> 字符串
-结束",
-        )
+结束")
         .unwrap_err();
         assert!(err.contains("签名冲突"), "实际错误：{err}");
     }
