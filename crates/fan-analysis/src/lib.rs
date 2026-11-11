@@ -21,6 +21,8 @@ pub mod compositecheck;
 pub mod embedcheck;
 /// 分段函数段间空白与签名匹配检查。
 pub mod mixfixcheck;
+/// `定义 本地(...)` native 绑定的静态告警。
+pub mod nativecheck;
 /// 单文件静态视图：符号收集、文档注释、函数范围。
 pub mod document;
 /// 跨文件符号索引（静态解析导入）。

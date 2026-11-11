@@ -65,6 +65,7 @@ name = "fan-analysis"
 version = "0.6.0"
 dependencies = [
  "fan-ast",
+ "fan-native",
  "fan-parser",
 ]
 

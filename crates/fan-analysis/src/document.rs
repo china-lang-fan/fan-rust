@@ -221,6 +221,9 @@ impl Document {
         };
         let mut sym = Symbol::new(name, kind, pos);
         sym.detail = detail;
+        if let Some(native) = &fn_lit.native {
+            sym.detail.push_str(&format!("  本地绑定 {}", native.spec));
+        }
         sym.doc = self.doc_before(pos.line);
         sym.end_pos = self.end_of(pos);
         for param in &fn_lit.params {

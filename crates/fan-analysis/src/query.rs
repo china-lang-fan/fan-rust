@@ -551,6 +551,18 @@ mod tests {
     }
 
     #[test]
+    fn 悬停本地函数显示绑定目标() {
+        let src = "定义 本地(\"json.jsonEncode\") 函数 生成(任意 值)\n    返回 空\n结束\n";
+        let index = Index::build("file:///t.凡", src);
+        let hover = index.hover(0, 28).expect("应悬停到函数");
+        assert!(
+            hover.content.contains("本地绑定 json.jsonEncode"),
+            "实际：{}",
+            hover.content
+        );
+    }
+
+    #[test]
     fn 定义跳转命中顶层符号() {
         let index = Index::build("file:///t.凡", SRC);
         let loc = index.definition(1, 4).expect("应找到定义");

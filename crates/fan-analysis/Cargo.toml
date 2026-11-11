@@ -9,3 +9,5 @@ description = "凡语言静态分析：不执行源码的符号收集、诊断�
 [dependencies]
 fan-ast = { workspace = true }
 fan-parser = { workspace = true }
+# 仅用于静态读取 core/ext 内建名清单做 native 名诊断，不触发扩展动态库加载。
+fan-native = { workspace = true }
