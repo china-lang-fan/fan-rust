@@ -9,8 +9,16 @@
 
 /// 诊断严重级别与诊断结构。
 pub mod diagnostic;
+/// 单文件静态视图：符号收集、文档注释、函数范围。
+pub mod document;
+/// 符号与符号种类。
+pub mod symbol;
+/// AST 遍历工具（子节点枚举与深度优先遍历）。
+pub mod walk;
 
 pub use diagnostic::{Diagnostic, Severity};
+pub use document::{Document, FnRange, ImportInfo};
+pub use symbol::{Symbol, SymbolKind};
 
 /// 库版本号，供 LSP `serverInfo` 等场景引用。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
