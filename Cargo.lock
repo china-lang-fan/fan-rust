@@ -61,6 +61,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
+name = "fan-analysis"
+version = "0.6.0"
+dependencies = [
+ "fan-ast",
+ "fan-parser",
+]
+
+[[package]]
 name = "fan-ast"
 version = "0.6.0"
 
@@ -68,9 +76,11 @@ version = "0.6.0"
 name = "fan-cli"
 version = "0.6.0"
 dependencies = [
+ "fan-analysis",
  "fan-ast",
  "fan-eval",
  "fan-lexer",
+ "fan-lsp",
  "fan-native",
  "fan-object",
  "fan-parser",
@@ -119,6 +129,16 @@ name = "fan-lexer"
 version = "0.6.0"
 dependencies = [
  "fan-ast",
+]
+
+[[package]]
+name = "fan-lsp"
+version = "0.6.0"
+dependencies = [
+ "fan-analysis",
+ "fan-ast",
+ "fan-parser",
+ "serde_json",
 ]
 
 [[package]]

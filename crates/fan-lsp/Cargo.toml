@@ -1,0 +1,13 @@
+[package]
+name = "fan-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "凡语言语言服务器（LSP 3.17 子集，JSON-RPC/stdio）"
+
+[dependencies]
+fan-analysis = { workspace = true }
+fan-ast = { workspace = true }
+fan-parser = { workspace = true }
+serde_json = { workspace = true }

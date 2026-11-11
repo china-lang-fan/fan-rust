@@ -170,9 +170,12 @@ fn run_repl<I: BufRead, O: Write>(input: I, mut output: O) -> Result<(), String>
 
 /// LSP 子命令占位。
 ///
-/// 完整的 JSON-RPC/stdio 语言服务器属批次 4（新建 fan-lsp crate）；
-/// 这里先固定命令入口，避免编辑器接入时再改启动契约。
+/// 完整的 JSON-RPC/stdio 语言服务器在 `fan-lsp` crate 内实现（批次4）；
+/// 分帧（`fan_lsp::read_message`/`write_message`）与协议结构已就绪，
+/// 待 `fan-analysis` 符号分析落地后在此启动服务器主循环。
 fn run_lsp() -> Result<(), String> {
+    // 引用一次以确认编译期依赖已打通，阶段3替换为真正的服务器启动。
+    let _ = fan_lsp::SERVER_NAME;
     Err("LSP 语言服务器将在批次 4 落地（fan-lsp crate）".to_string())
 }
 

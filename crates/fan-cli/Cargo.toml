@@ -14,3 +14,5 @@ fan-object = { workspace = true }
 fan-parser = { workspace = true }
 fan-testrun = { workspace = true }
 fan-native = { workspace = true }
+fan-analysis = { workspace = true }
+fan-lsp = { workspace = true }

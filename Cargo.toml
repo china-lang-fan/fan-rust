@@ -12,6 +12,8 @@ members = [
     "crates/fan-ext-regex",
     "crates/fan-ext-json",
     "crates/fan-ext-http",
+    "crates/fan-analysis",
+    "crates/fan-lsp",
 ]
 
 [workspace.package]
@@ -31,8 +33,11 @@ fan-ext-regex = { path = "crates/fan-ext-regex" }
 fan-ext-json = { path = "crates/fan-ext-json" }
 fan-ext-http = { path = "crates/fan-ext-http" }
 fan-testrun = { path = "crates/fan-testrun" }
+fan-analysis = { path = "crates/fan-analysis" }
+fan-lsp = { path = "crates/fan-lsp" }
 
 thiserror = "1"
+serde_json = "1"
 
 [profile.release]
 opt-level = 3
