@@ -1235,7 +1235,43 @@ impl Interpreter {
         };
         // `@内建` 会把原生实现挂到函数上，此后调用不再执行函数体。
         self.process_function_tags(&mut fn_obj)?;
+        // `定义 本地(...)`：native 优先；找不到原生实现时保持 None，
+        // 调用即回退执行函数体（见 apply_function 的 native_impl 分派）。
+        if let Some(decl) = &n.native {
+            if let Some(builtin) = self.bind_native(decl) {
+                fn_obj.native_impl = Some(builtin);
+            }
+        }
         value(Object::Func(Rc::new(fn_obj)))
+    }
+
+    /// 按 `定义 本地("模块.函数")` 声明解析原生实现。
+    ///
+    /// 与旧 `@内建` 标签的关键差异是**静默回退**：以下三种「找不到」都返回
+    /// `None` 而非报错，由调用方回退执行函数体：
+    ///
+    /// 1. 无模块前缀且名字不在已注册的 core 内建里；
+    /// 2. 扩展模块的动态库加载失败（`ensure` 已内置默认实现回落，仍失败）；
+    /// 3. 模块加载成功但其中没有该函数名。
+    fn bind_native(&mut self, decl: &ast::NativeDecl) -> Option<Rc<Builtin>> {
+        if let Some(module) = &decl.module {
+            let rt = self.env.borrow().runtime();
+            let loaded = {
+                let mut rt_mut = rt.borrow_mut();
+                self.ext.borrow_mut().ensure(&mut rt_mut, module)
+            };
+            // 库加载失败：静默回退函数体，不产生运行时信号。
+            if loaded.is_err() {
+                return None;
+            }
+        }
+        // 无模块前缀：只查 core 已注册内建；有模块前缀：ensure 后再查。
+        // 查无此名同样静默回退。
+        self.env
+            .borrow()
+            .runtime()
+            .borrow()
+            .lookup_native(&decl.name)
     }
 
     /// 求 `...值` 并摊平成元素列表：数组字面量与调用实参共用。
