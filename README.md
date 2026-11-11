@@ -10,11 +10,11 @@
 ```bash
 cargo build --release
 
-# 编译产物叫 fan-cli，语言里的命令名是 fan
-./target/release/fan-cli 运行 脚本.凡      # 执行脚本
-./target/release/fan-cli 测试 ../fan-sdk   # 跑标准库测试
-./target/release/fan-cli 版本
-./target/release/fan-cli 帮助
+# crate 包名是 fan-cli，产出的可执行文件（语言命令）叫 fan
+./target/release/fan 运行 脚本.凡      # 执行脚本
+./target/release/fan 测试 ../fan-sdk   # 跑标准库测试
+./target/release/fan 版本
+./target/release/fan 帮助
 ```
 
 `导入 "编码"` 这类模块引用，按以下顺序查找：脚本所在目录 → 环境变量
@@ -34,7 +34,7 @@ cargo build --release
 | `fan-eval` | 求值器（语句、表达式、模型、异常） |
 | `fan-native` | 原生函数库，**只依赖标准库** |
 | `fan-testrun` | `*_测试.凡` 的收集与运行 |
-| `fan-cli` | 命令行入口 |
+| `fan-cli` | 命令行入口（crate 包名；产出的可执行文件为 `fan`） |
 | `fan-ext-*` | 扩展库（依赖第三方库，编译为动态库按需加载） |
 
 ## 标签
@@ -70,7 +70,7 @@ CI 与本地用同一套四道门禁：
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo build -p fan-cli && ./target/debug/fan-cli 测试 "$FAN_SDK"
+cargo build -p fan-cli && ./target/debug/fan 测试 "$FAN_SDK"
 ```
 
 前两道管风格与静态检查，第三道是 Rust 单测，第四道跑**凡语言写的**
@@ -135,7 +135,7 @@ git push origin v0.2.0
 
 ```
 fan-0.2.0-x86_64-unknown-linux-gnu/
-├── fan-cli        # 可执行（Windows 下为 fan-cli.exe）
+├── fan            # 可执行（Windows 下为 fan.exe）
 └── sdk/           # 标准库，导入时自动查找
 ```
 
@@ -149,7 +149,7 @@ fan-0.2.0-x86_64-unknown-linux-gnu/
 | Windows x86_64 | `fan-<版本>-x86_64-pc-windows-msvc.zip` |
 
 macOS 的二进制未签名，首次运行若被 Gatekeeper 拦下，执行
-`xattr -d com.apple.quarantine fan-cli` 即可。
+`xattr -d com.apple.quarantine fan` 即可。
 
 ## 许可
 

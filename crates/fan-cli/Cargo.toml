@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 description = "凡语言命令行工具"
 
+# crate 包名仍为 fan-cli（被 workspace 与各 crate 依赖），
+# 但对外分发的可执行文件命名为语言命令 `fan`（Windows 下为 fan.exe）。
+[[bin]]
+name = "fan"
+path = "src/main.rs"
+
 [dependencies]
 fan-ast = { workspace = true }
 fan-eval = { workspace = true }

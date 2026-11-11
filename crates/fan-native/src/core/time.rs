@@ -257,12 +257,10 @@ pub fn parse_time(layout: &str, text: &str) -> Result<i64, String> {
                     }
                     ti += 2;
                 }
-                ".000" => {
-                    // 毫秒不参与秒级时间戳，跳过
-                    if text_chars.get(ti) == Some(&'.') {
-                        ti += 1;
-                        let _ = read_number(&text_chars, &mut ti, 3);
-                    }
+                // 毫秒不参与秒级时间戳，跳过
+                ".000" if text_chars.get(ti) == Some(&'.') => {
+                    ti += 1;
+                    let _ = read_number(&text_chars, &mut ti, 3);
                 }
                 "MST" | "Z07:00" | "Z0700" | "-0700" => {
                     // 时区不支持解析，按 UTC 处理

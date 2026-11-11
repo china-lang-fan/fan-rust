@@ -203,7 +203,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "fan-cli-{}-{}-{}",
+            "fan-{}-{}-{}",
             tag,
             std::process::id(),
             SEQ.fetch_add(1, Ordering::SeqCst)

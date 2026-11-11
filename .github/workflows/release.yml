@@ -1,7 +1,7 @@
 name: release
 
 # 打 v 开头的 tag 触发：先跑一遍门禁，再为各平台产出安装包挂到 Release。
-# 安装包内容 = fan-cli 可执行文件 + 标准库（sdk/ 目录）。
+# 安装包内容 = fan 可执行文件 + 标准库（sdk/ 目录）。
 
 on:
   push:
@@ -30,7 +30,7 @@ jobs:
           repository: china-lang-fan/fan-sdk
           path: fan-sdk
 
-      # 版本号只认 Cargo.toml（fan-cli 版本 读的就是它），tag 必须与之相同，
+      # 版本号只认 Cargo.toml（fan-cli 包版本读的就是它），tag 必须与之相同，
       # 以免出现「包叫 0.2.0、fan 版本 却报 0.1.0」
       - name: 校验 tag 与 Cargo.toml 版本一致
         run: |
@@ -65,7 +65,7 @@ jobs:
       - name: 标准库测试（fan 测试）
         run: |
           cargo build -p fan-cli
-          ./target/debug/fan-cli 测试 "$FAN_SDK"
+          ./target/debug/fan 测试 "$FAN_SDK"
 
   build:
     name: 构建安装包
@@ -121,14 +121,14 @@ jobs:
           echo "FAN_VERSION=[$FAN_VERSION]"
           pkg="fan-$FAN_VERSION-${{ matrix.target }}"
           mkdir -p "$pkg/sdk"
-          if [ -f "target/${{ matrix.target }}/release/fan-cli.exe" ]; then
-            cp "target/${{ matrix.target }}/release/fan-cli.exe" "$pkg/"
+          if [ -f "target/${{ matrix.target }}/release/fan.exe" ]; then
+            cp "target/${{ matrix.target }}/release/fan.exe" "$pkg/"
           else
-            cp "target/${{ matrix.target }}/release/fan-cli" "$pkg/"
+            cp "target/${{ matrix.target }}/release/fan" "$pkg/"
           fi
           cp fan-sdk/*.凡 "$pkg/sdk/"
           cp fan-sdk/README.md fan-sdk/LICENSE "$pkg/sdk/"
-          # 扩展动态库：解释器按可执行文件所在目录查找，故与 fan-cli 同级。
+          # 扩展动态库：解释器按可执行文件所在目录查找，故与 fan 同级。
           # 库名各平台不同：macOS 是 libfan_ext_X.dylib，Linux 是 .so，
           # Windows 是 fan_ext_X.dll（无 lib 前缀）。这里不做「找不到就跳过」，
           # 少一个库就让本步失败——否则包能跑，但会静默回落成能力受限的

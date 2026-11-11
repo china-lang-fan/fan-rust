@@ -47,4 +47,4 @@ jobs:
       - name: 标准库测试（fan 测试）
         run: |
           cargo build -p fan-cli
-          ./target/debug/fan-cli 测试 "$FAN_SDK"
+          ./target/debug/fan 测试 "$FAN_SDK"
