@@ -106,7 +106,8 @@ pub fn specs() -> Vec<NativeSpec> {
                 }
             }),
         ),
-        // 构造错误值（不抛出），供凡语言层组装并返回
+        // 构造错误值（不抛出），供凡语言层组装并返回。
+        // 参数与 Go 版 builtinError 对齐：消息、可选错误码（字符串）、可选详情（字典）。
         NativeSpec::core(
             "error",
             Some(1),
@@ -115,8 +116,33 @@ pub fn specs() -> Vec<NativeSpec> {
                     Object::Str(s) => s.to_string(),
                     other => other.inspect(),
                 };
+                let mut value = ErrorValue::new(message);
+                if let Some(second) = args.get(1) {
+                    match second {
+                        Object::Str(code) => value = value.with_code(code.as_ref()),
+                        Object::Nil => {}
+                        other => {
+                            return Err(format!(
+                                "错误 的第 2 个参数（错误码）必须是字符串，实际是 {}",
+                                other.kind()
+                            ))
+                        }
+                    }
+                }
+                if let Some(third) = args.get(2) {
+                    match third {
+                        Object::Dict(details) => value = value.with_details(details.clone()),
+                        Object::Nil => {}
+                        other => {
+                            return Err(format!(
+                                "错误 的第 3 个参数（详情）必须是字典，实际是 {}",
+                                other.kind()
+                            ))
+                        }
+                    }
+                }
                 Ok(vec![Object::Error(Rc::new(std::cell::RefCell::new(
-                    ErrorValue::new(message),
+                    value,
                 )))])
             }),
         ),
@@ -319,6 +345,53 @@ mod tests {
             Object::Error(e) => assert_eq!(e.borrow().message, "出错了"),
             other => panic!("期望错误值，实际 {}", other.inspect()),
         }
+    }
+
+    #[test]
+    fn 构造错误值携带错误码与详情() {
+        use fan_object::{FanDict, Object};
+        let mut details = FanDict::new();
+        details.set(Object::string("路径"), Object::string("/x"));
+        let out = call(
+            "error",
+            vec![
+                Object::string("磁盘满"),
+                Object::string("E01"),
+                Object::Dict(details),
+            ],
+        )
+        .unwrap();
+        match &out[0] {
+            Object::Error(e) => {
+                let e = e.borrow();
+                assert_eq!(e.message, "磁盘满");
+                assert_eq!(e.code, "E01");
+                let got = e
+                    .details
+                    .as_ref()
+                    .and_then(|d| d.get(&Object::string("路径")));
+                assert_eq!(got, Some(Object::string("/x")));
+            }
+            other => panic!("期望错误值，实际 {}", other.inspect()),
+        }
+    }
+
+    #[test]
+    fn 构造错误值错误码类型非法时报错() {
+        use fan_object::Object;
+        let err = call("error", vec![Object::string("m"), Object::int(1)]).unwrap_err();
+        assert!(err.contains("错误码"), "实际：{err}");
+    }
+
+    #[test]
+    fn 构造错误值详情类型非法时报错() {
+        use fan_object::Object;
+        let err = call(
+            "error",
+            vec![Object::string("m"), Object::Nil, Object::int(1)],
+        )
+        .unwrap_err();
+        assert!(err.contains("详情"), "实际：{err}");
     }
 
     #[test]
