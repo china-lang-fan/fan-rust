@@ -358,10 +358,52 @@ impl Interpreter {
                 Some(v) => Ok(v),
                 None => self.bind_primitive_method(obj, name, pos),
             },
+            Object::TagContext(ctx) => self.tag_context_member(&ctx, name, pos),
             other => Err(FanError::at(
                 format!("{} 不支持成员访问", other.kind()),
                 pos,
             )),
+        }
+    }
+
+    /// 标签上下文成员：`标签`、`当前实现`、`替换实现`。
+    ///
+    /// `替换实现` 返回一个内建函数，处理器调用它即把新实现写回上下文；
+    /// 对应 Go 版 `runtimeTagContext.member`。
+    fn tag_context_member(
+        &mut self,
+        ctx: &Rc<fan_object::TagContextValue>,
+        name: &str,
+        pos: Position,
+    ) -> Result<Object, FanError> {
+        match name {
+            "标签" | "Tag" => Ok(ctx.tag()),
+            "目标" => Err(FanError::at("标签上下文暂不支持 目标 成员", pos)),
+            "当前实现" => Ok(ctx.current()),
+            "替换实现" => {
+                let ctx = ctx.clone();
+                let func = fan_object::Builtin::new(
+                    "替换实现",
+                    Some(1),
+                    Rc::new(move |_rt, args| {
+                        let Some(first) = args.into_iter().next() else {
+                            return Err("替换实现 需要 1 个参数".to_string());
+                        };
+                        match first {
+                            Object::Func(f) => {
+                                ctx.replace(f);
+                                Ok(vec![Object::Nil])
+                            }
+                            other => Err(format!(
+                                "替换实现 的参数必须是可调用对象，实际 {}",
+                                other.kind()
+                            )),
+                        }
+                    }),
+                );
+                Ok(Object::Builtin(Rc::new(func)))
+            }
+            _ => Err(FanError::at(format!("标签上下文没有成员 {name}"), pos)),
         }
     }
 
@@ -649,6 +691,7 @@ pub fn bind_method(
         is_method: true,
         self_value: Some(Object::Instance(inst)),
         native_impl: f.native_impl.clone(),
+        tag_replacement: f.tag_replacement.clone(),
         owner: f.owner.clone(),
         name_segments: f.name_segments.clone(),
         connectors: f.connectors.clone(),

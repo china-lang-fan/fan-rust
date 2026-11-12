@@ -44,6 +44,8 @@ pub struct Function {
     pub self_value: Option<Object>,
     /// `定义 本地(...)` 绑定的原生实现；存在时调用函数即转调原生函数。
     pub native_impl: Option<Rc<Builtin>>,
+    /// 标签处理器通过 `上下文.替换实现(...)` 写入的新实现；存在时调用优先转调它。
+    pub tag_replacement: Option<Rc<Function>>,
     /// 作为方法时所归属的模型。
     pub owner: Option<Rc<Class>>,
 
@@ -79,6 +81,7 @@ impl Function {
             is_method: false,
             self_value: None,
             native_impl: None,
+            tag_replacement: None,
             owner: None,
             name_segments: Vec::new(),
             connectors: Vec::new(),

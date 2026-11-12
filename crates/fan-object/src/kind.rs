@@ -40,6 +40,8 @@ pub enum Kind {
     Instance,
     /// 内建函数 `内建`
     Builtin,
+    /// 标签处理上下文 `标签上下文`
+    TagContext,
 }
 
 impl fmt::Display for Kind {
@@ -61,6 +63,7 @@ impl fmt::Display for Kind {
             Kind::Class => "模型",
             Kind::Instance => "实例",
             Kind::Builtin => "内建",
+            Kind::TagContext => "标签上下文",
         };
         f.write_str(s)
     }
@@ -122,6 +125,7 @@ pub fn runtime_type_name(value: &crate::Object) -> &'static str {
         Object::Class(_) => "class",
         Object::Instance(_) => "instance",
         Object::Builtin(_) => "builtin",
+        Object::TagContext(_) => "tag_context",
     }
 }
 

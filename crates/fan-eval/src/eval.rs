@@ -1227,6 +1227,7 @@ impl Interpreter {
             is_method: false,
             self_value: None,
             native_impl: None,
+            tag_replacement: None,
             owner: None,
             name_segments: n.name_segments.clone(),
             connectors: n.connectors.clone(),
@@ -1399,6 +1400,12 @@ impl Interpreter {
         // `定义 本地(...)` 绑定了原生实现的函数直接转调，不再执行函数体。
         if fn_obj.native_impl.is_some() {
             return self.call_native_impl(&fn_obj, args, pos);
+        }
+
+        // 标签处理器通过 `上下文.替换实现(...)` 改写了实现：转调替换函数。
+        if let Some(replacement) = &fn_obj.tag_replacement {
+            let callee = Object::Func(replacement.clone());
+            return self.apply_function(&callee, args, pos);
         }
 
         // 参数个数校验。方法若把接收者显式写成首个形参（`问候(自己)`），

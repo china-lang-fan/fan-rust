@@ -126,6 +126,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fan-ext-tag"
+version = "0.6.1"
+dependencies = [
+ "fan-ast",
+ "fan-object",
+]
+
+[[package]]
 name = "fan-lexer"
 version = "0.6.1"
 dependencies = [

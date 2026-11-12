@@ -110,7 +110,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: 构建 release
-        run: cargo build --release --target ${{ matrix.target }} -p fan-cli -p fan-ext-json -p fan-ext-regex -p fan-ext-http
+        run: cargo build --release --target ${{ matrix.target }} -p fan-cli -p fan-ext-json -p fan-ext-regex -p fan-ext-http -p fan-ext-tag
 
       # 标准库只带 .凡 与说明文件，不带 .git
       - name: 组装安装包

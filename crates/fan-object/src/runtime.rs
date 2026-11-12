@@ -57,6 +57,12 @@ pub struct Runtime {
     /// 同一根段名下允许按参数类型重载，签名由调用实参的运行时类型重建，
     /// 与 Go 版 `mixfixFunctionRegistry` 一致。
     pub mixfix_functions: HashMap<String, HashMap<String, Rc<Function>>>,
+    /// 凡语言标签处理器表：标签名 → 处理函数。
+    ///
+    /// 由 `注册标签处理(标签名, 处理函数)`（经 fan-ext-tag 或内置回落注册）写入，
+    /// 求值器在函数声明期按标签名查这里并回调处理函数。object 层只负责存储，
+    /// 实际回调（需要解释器）由 fan-eval 完成。
+    pub fan_tag_handlers: HashMap<String, Rc<Function>>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -94,6 +100,7 @@ impl Runtime {
             native_functions: HashMap::new(),
             primitive_methods: HashMap::new(),
             mixfix_functions: HashMap::new(),
+            fan_tag_handlers: HashMap::new(),
         }
     }
 
@@ -251,6 +258,16 @@ impl Runtime {
     /// 按根段名与运行时签名查找分段函数。
     pub fn lookup_mixfix(&self, root: &str, signature: &str) -> Option<Rc<Function>> {
         self.mixfix_functions.get(root)?.get(signature).cloned()
+    }
+
+    /// 登记一个凡语言标签处理器；同名处理器会被覆盖（与 Go 版一致）。
+    pub fn register_fan_tag_handler(&mut self, tag_name: &str, func: Rc<Function>) {
+        self.fan_tag_handlers.insert(tag_name.to_string(), func);
+    }
+
+    /// 按标签名查找凡语言处理器。
+    pub fn lookup_fan_tag_handler(&self, tag_name: &str) -> Option<Rc<Function>> {
+        self.fan_tag_handlers.get(tag_name).cloned()
     }
 
     /// 在指定环境内查找模型（内建模型优先，其次是环境中的模型值）。

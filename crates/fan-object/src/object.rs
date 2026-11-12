@@ -11,6 +11,7 @@
 use crate::collection::{dict_key, ErrorValue, FanArray, FanDict, ModuleValue};
 use crate::kind::Kind;
 use crate::runtime_entity::{Builtin, Class, Function, Instance};
+use crate::tag_context::TagContextValue;
 use fan_ast::format_f64;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -50,6 +51,8 @@ pub enum Object {
     Class(Rc<Class>),
     Instance(Rc<Instance>),
     Builtin(Rc<Builtin>),
+    /// 标签处理上下文（标签处理器回调时接收）。
+    TagContext(Rc<TagContextValue>),
 }
 
 impl Object {
@@ -73,6 +76,7 @@ impl Object {
             Object::Class(_) => Kind::Class,
             Object::Instance(_) => Kind::Instance,
             Object::Builtin(_) => Kind::Builtin,
+            Object::TagContext(_) => Kind::TagContext,
         }
     }
 
@@ -119,6 +123,7 @@ impl Object {
                 format!("{}{{{}}}", i.class.name, parts.join(", "))
             }
             Object::Builtin(b) => format!("内建 {}", b.name),
+            Object::TagContext(_) => "标签上下文".to_string(),
         }
     }
 
@@ -293,6 +298,7 @@ impl PartialEq for Object {
             (Object::Builtin(a), Object::Builtin(b)) => {
                 a.name == b.name && Rc::ptr_eq(&a.func, &b.func)
             }
+            (Object::TagContext(a), Object::TagContext(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
     }

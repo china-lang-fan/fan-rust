@@ -27,6 +27,7 @@ pub mod kind;
 pub mod object;
 pub mod runtime;
 pub mod runtime_entity;
+pub mod tag_context;
 
 pub use collection::{
     dict_key, error_message, is_error, new_error, new_error_with_code, new_tuple, valid_dict_key,
@@ -45,6 +46,7 @@ pub use runtime::{
 pub use runtime_entity::{
     Builtin, Class, Function, Instance, Interface, NamedType, NativeGroup, NativeImpl, NativeSpec,
 };
+pub use tag_context::TagContextValue;
 
 #[cfg(test)]
 mod tests {

@@ -13,6 +13,7 @@ use std::rc::Rc;
 pub mod http;
 pub mod json;
 pub mod regex;
+pub mod tag;
 
 /// 已知模块名 → 默认实现的注册入口。
 ///
@@ -20,7 +21,7 @@ pub mod regex;
 pub fn has_default(module: &str) -> bool {
     matches!(
         module.to_lowercase().as_str(),
-        "json" | "正则" | "regex" | "网络" | "http"
+        "json" | "正则" | "regex" | "网络" | "http" | "标签" | "tag"
     )
 }
 
@@ -37,6 +38,10 @@ pub fn register(rt: &mut Runtime, module: &str) -> Result<(), String> {
         }
         "网络" | "http" => {
             register_all(rt, http::specs());
+            Ok(())
+        }
+        "标签" | "tag" => {
+            register_all(rt, tag::specs());
             Ok(())
         }
         other => Err(format!("模块 {} 既没有扩展库，也没有默认实现", other)),

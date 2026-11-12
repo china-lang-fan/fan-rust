@@ -41,6 +41,7 @@ pub fn lib_name(module: &str) -> &str {
     match module {
         "正则" => "regex",
         "网络" => "http",
+        "标签" => "tag",
         _ => module,
     }
 }
@@ -388,9 +389,11 @@ mod tests {
     fn 中文模块名映射为ascii库名() {
         assert_eq!(lib_name("正则"), "regex");
         assert_eq!(lib_name("网络"), "http");
+        assert_eq!(lib_name("标签"), "tag");
         assert_eq!(lib_name("json"), "json");
         assert_eq!(lib_name("自定义"), "自定义");
         assert!(sys::file_name("正则").contains("fan_ext_regex"));
+        assert!(sys::file_name("标签").contains("fan_ext_tag"));
     }
 
     #[test]

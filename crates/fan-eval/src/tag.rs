@@ -1,21 +1,24 @@
-//! 标签系统框架。
+//! 标签系统框架与凡语言标签处理器分派。
 //!
 //! 凡语言的标签写在声明之前，用于给函数或模型附加元信息。本模块提供统一的
 //! 处理器框架：每种标签名对应一个 [`TagHandler`]，通过 [`TagRegistry`] 分发。
-//! 新增标签只需实现 `TagHandler` 并注册，无需改动求值器。
+//! 新增 Rust 侧标签只需实现 `TagHandler` 并注册，无需改动求值器。
+//!
+//! 此外，凡语言代码可用 `注册标签处理(标签名, 处理函数)`（见 `fan-sdk/库/标签工具.凡`，
+//! 经 fan-ext-tag 或内置回落注册到 `Runtime::fan_tag_handlers`）登记一个**凡语言处理器**。
+//! 函数声明期遇到带处理器的标签时，求值器构造标签上下文并回调该凡函数，
+//! 处理器可通过 `上下文.替换实现(新实现)` 改写目标函数。对应 Go 版
+//! `evaluator/tag.go` 的 `processTags`/`registerFanTagHandler`。
 //!
 //! 旧的 `@内建("名字")` 标签已移除：原生函数改由
-//! `定义 本地("模块.函数") 函数 ...` 声明绑定（见 `eval::Interpreter::bind_native`），
-//! 因此默认注册表不再内置任何处理器。标签框架本身保留，供 `@测试`（testrun 在
-//! AST 层静态识别）、切面等自定义标签使用；遇到未注册标签时静默忽略，由 LSP
-//! 静态分析负责告警。
-//!
-//! 对应 Go 版 `evaluator/tag.go`。
+//! `定义 本地("模块.函数") 函数 ...` 声明绑定（见 `eval::Interpreter::bind_native`）。
+//! 遇到未注册标签时静默忽略，由 LSP 静态分析负责告警。
 
 use crate::error::FanError;
 use crate::eval::Interpreter;
+use crate::oop::new_zero_instance;
 use fan_ast::TagExpr;
-use fan_object::{Function, Object};
+use fan_object::{Class, Function, Instance, Object, TagContextValue};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -77,21 +80,103 @@ impl TagRegistry {
 
 impl Interpreter {
     /// 处理函数声明上的全部标签，按书写顺序依次分派。
+    ///
+    /// 分派顺序：先查 Rust 侧 [`TagRegistry`]（默认空），再查 `Runtime` 中的
+    /// 凡语言处理器（`注册标签处理` 登记）。两者都没有命中的标签静默忽略。
     pub fn process_function_tags(&mut self, func: &mut Function) -> Result<(), FanError> {
         if func.tags.is_empty() {
             return Ok(());
         }
-        // 先把标签取出，避免分派期间对 func 的重复借用
         let tags = func.tags.clone();
-        // 取出注册表副本分派，避免与 `&mut self` 的借用冲突
         let registry = self.tags.clone();
         for tag in &tags {
-            let mut ctx = TagContext {
-                interp: self,
-                func,
-                tag,
-            };
-            registry.dispatch(&mut ctx)?;
+            // Rust 侧处理器优先。
+            if self.has_rust_handler(tag) {
+                let mut ctx = TagContext {
+                    interp: self,
+                    func,
+                    tag,
+                };
+                registry.dispatch(&mut ctx)?;
+                continue;
+            }
+            // 凡语言处理器：在 Runtime 表中按标签名查找。
+            self.apply_fan_tag_handler(func, tag)?;
+        }
+        Ok(())
+    }
+
+    fn has_rust_handler(&self, tag: &TagExpr) -> bool {
+        self.tags.names().contains(&tag.type_name.as_str())
+    }
+
+    /// 构造标签模型实例；解析不到模型时返回 `空`（未注册标签不阻断求值）。
+    fn build_tag_instance(&mut self, tag: &TagExpr) -> Result<Object, FanError> {
+        let class = {
+            let rt = self.env.borrow().runtime();
+            let env = self.env.clone();
+            let found = rt.borrow().resolve_class(&tag.type_name, &env.borrow());
+            found
+        };
+        let Some(class) = class else {
+            return Ok(Object::Nil);
+        };
+        if tag.positional.len() > 1 {
+            return Err(FanError::at("标签未命名参数最多一个", tag.pos));
+        }
+        let inst = new_zero_instance(&class);
+        if let Some(first) = tag.positional.first() {
+            let v = self.eval_expr(first)?.into_value()?;
+            self.write_tag_field(&inst, &class, "值", v, tag.pos)?;
+        }
+        for arg in &tag.named {
+            let v = self.eval_expr(&arg.value)?.into_value()?;
+            self.write_tag_field(&inst, &class, &arg.name, v, tag.pos)?;
+        }
+        Ok(Object::Instance(inst))
+    }
+
+    /// 写入标签实例字段；模型缺该字段时报错（与 Go 版 createTagInstance 一致）。
+    fn write_tag_field(
+        &mut self,
+        inst: &Rc<Instance>,
+        class: &Rc<Class>,
+        name: &str,
+        val: Object,
+        pos: fan_ast::Position,
+    ) -> Result<(), FanError> {
+        inst.set_field_value(name, val)
+            .map_err(|_| FanError::at(format!("标签模型 {} 没有字段 {}", class.name, name), pos))
+    }
+
+    /// 查 Runtime 中的凡语言标签处理器并回调，应用其替换实现。
+    fn apply_fan_tag_handler(
+        &mut self,
+        func: &mut Function,
+        tag: &TagExpr,
+    ) -> Result<(), FanError> {
+        let handler = {
+            let rt = self.env.borrow().runtime();
+            let found = rt.borrow().lookup_fan_tag_handler(&tag.type_name);
+            found
+        };
+        let Some(handler) = handler else {
+            // 未注册标签：静默忽略。
+            return Ok(());
+        };
+        let tag_instance = self.build_tag_instance(tag)?;
+        // 当前实现即被标注函数自身（尚未替换前的可调用对象）。
+        let current = Object::Func(Rc::new(func.clone()));
+        let ctx_value = Rc::new(TagContextValue::new(tag_instance, current));
+        let context = Object::TagContext(ctx_value.clone());
+
+        // 回调凡语言处理器：处理函数(上下文)。
+        let callee = Object::Func(handler);
+        self.apply_function(&callee, vec![context], tag.pos)?;
+
+        // 处理器通过 上下文.替换实现(...) 写入的新实现。
+        if let Some(replacement) = ctx_value.replacement() {
+            func.tag_replacement = Some(replacement);
         }
         Ok(())
     }

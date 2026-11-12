@@ -12,6 +12,7 @@ members = [
     "crates/fan-ext-regex",
     "crates/fan-ext-json",
     "crates/fan-ext-http",
+    "crates/fan-ext-tag",
     "crates/fan-analysis",
     "crates/fan-lsp",
 ]
@@ -32,6 +33,7 @@ fan-native = { path = "crates/fan-native" }
 fan-ext-regex = { path = "crates/fan-ext-regex" }
 fan-ext-json = { path = "crates/fan-ext-json" }
 fan-ext-http = { path = "crates/fan-ext-http" }
+fan-ext-tag = { path = "crates/fan-ext-tag" }
 fan-testrun = { path = "crates/fan-testrun" }
 fan-analysis = { path = "crates/fan-analysis" }
 fan-lsp = { path = "crates/fan-lsp" }
