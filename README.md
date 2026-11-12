@@ -21,6 +21,17 @@ cargo build --release
 `FAN_SDK` → 可执行文件旁 → 系统安装位置。标准库不在本仓库内，本机开发时
 用 `FAN_SDK` 指向它，或把 `fan-sdk` 放在本仓库的同级目录（测试会自动向上找）。
 
+## 示例
+
+[`examples/`](./examples) 收集可直接运行的凡语言脚本，覆盖变量与运算、
+控制流、函数、多返回值、模型、错误处理、字典/数组、标签与模块导入等：
+
+```bash
+./target/debug/fan 运行 examples/函数.fan
+./target/debug/fan 运行 examples/模型.fan
+./target/debug/fan 运行 examples/模块.fan      # 依赖 examples/modules 子目录
+```
+
 ## 仓库结构
 
 按依赖分层，单向依赖：`ast → object → native/eval → cli`。
