@@ -37,11 +37,19 @@ pub const LIB_PREFIX: &str = "fan_ext_";
 ///
 /// 凡代码写的模块名（`定义 本地("正则.regexMatch") ...` 里的 `正则`）可以是中文，而
 /// ASCII 更稳妥（跨平台、构建工具兼容），故在此固定别名。
+///
+/// 命名契约：core 组内建用裸名（无 `.` 前缀，见 `core/`），ext 组内建一律用
+/// `模块.函数` 形式，模块段必须能在此映射到具体动态库。这里显式登记全部 ext
+/// 模块，避免依赖「模块段恰好等于库名」的巧合——新增 ext 库时同步补一条。
 pub fn lib_name(module: &str) -> &str {
     match module {
         "正则" => "regex",
+        "regex" => "regex",
         "网络" => "http",
+        "http" => "http",
+        "json" => "json",
         "标签" => "tag",
+        "tag" => "tag",
         _ => module,
     }
 }
@@ -387,13 +395,29 @@ mod tests {
 
     #[test]
     fn 中文模块名映射为ascii库名() {
+        // 中文别名
         assert_eq!(lib_name("正则"), "regex");
         assert_eq!(lib_name("网络"), "http");
         assert_eq!(lib_name("标签"), "tag");
+        // ASCII 模块名显式自映射（不依赖默认分支的巧合）
+        assert_eq!(lib_name("regex"), "regex");
+        assert_eq!(lib_name("http"), "http");
         assert_eq!(lib_name("json"), "json");
+        assert_eq!(lib_name("tag"), "tag");
+        // 未登记的名字原样返回（core 裸名不会走到这里）
         assert_eq!(lib_name("自定义"), "自定义");
         assert!(sys::file_name("正则").contains("fan_ext_regex"));
         assert!(sys::file_name("标签").contains("fan_ext_tag"));
+        assert!(sys::file_name("json").contains("fan_ext_json"));
+    }
+
+    #[test]
+    fn 全部ext模块都有默认回落() {
+        // 与 lib_name 中的 ext 模块保持一致：每个动态库都应有默认实现，
+        // 防止新增 ext 库时只改了映射却漏了回落。
+        for module in ["regex", "http", "json", "tag"] {
+            assert!(default::has_default(module), "模块 {module} 缺少默认实现");
+        }
     }
 
     #[test]
