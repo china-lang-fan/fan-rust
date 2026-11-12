@@ -359,10 +359,51 @@ impl Interpreter {
                 None => self.bind_primitive_method(obj, name, pos),
             },
             Object::TagContext(ctx) => self.tag_context_member(&ctx, name, pos),
+            Object::Error(cell) => Self::error_member(&cell.borrow(), name, pos),
             other => Err(FanError::at(
                 format!("{} 不支持成员访问", other.kind()),
                 pos,
             )),
+        }
+    }
+
+    /// 错误对象成员：与 Go 版 `Error` 的成员保持一致。
+    ///
+    /// `消息`/`错误码`(`码`) 为字符串，`详情` 为字典，`原因` 为错误或空，
+    /// `调用栈` 为由帧字典组成的数组，`追踪` 为完整文本。
+    fn error_member(
+        err: &fan_object::ErrorValue,
+        name: &str,
+        pos: Position,
+    ) -> Result<Object, FanError> {
+        match name {
+            "消息" => Ok(Object::string(err.message.clone())),
+            "错误码" | "码" => Ok(Object::string(err.code.clone())),
+            "详情" => match &err.details {
+                Some(d) => Ok(Object::Dict(d.clone())),
+                None => Ok(Object::Dict(FanDict::new())),
+            },
+            "原因" => match &err.cause {
+                Some(cause) => Ok(Object::Error(Rc::new(RefCell::new((**cause).clone())))),
+                None => Ok(Object::Nil),
+            },
+            "调用栈" => {
+                let frames: Vec<Object> = err
+                    .stack
+                    .iter()
+                    .map(|f| {
+                        let mut d = FanDict::new();
+                        d.set(Object::string("函数"), Object::string(f.function.clone()));
+                        d.set(Object::string("文件"), Object::string(f.file.clone()));
+                        d.set(Object::string("行"), Object::int(f.line as i64));
+                        d.set(Object::string("列"), Object::int(f.column as i64));
+                        Object::Dict(d)
+                    })
+                    .collect();
+                Ok(Object::array(frames))
+            }
+            "追踪" => Ok(Object::string(err.trace())),
+            _ => Err(FanError::at(format!("错误 没有成员 {name}"), pos)),
         }
     }
 
@@ -1590,5 +1631,23 @@ mod tests {
 实现者() 是 乙",
             "真",
         );
+    }
+
+    #[test]
+    fn 错误对象成员与go版对齐() {
+        check("变量 e = 错误(\"磁盘满\")\ne.消息", "磁盘满");
+        check("变量 e = 错误(\"x\")\ne.码", "");
+        check("变量 e = 错误(\"x\")\ne.详情", "{}");
+        check("变量 e = 错误(\"x\")\ne.原因", "空");
+        check("变量 e = 错误(\"x\")\ne.调用栈", "[]");
+        // 追踪至少包含错误自身的消息
+        let out = run("变量 e = 错误(\"磁盘满\")\ne.追踪").unwrap();
+        assert!(out.inspect().contains("磁盘满"));
+    }
+
+    #[test]
+    fn 错误对象未知成员报错() {
+        let err = run("变量 e = 错误(\"x\")\ne.不存在").unwrap_err();
+        assert!(err.contains("错误 没有成员 不存在"), "实际：{err}");
     }
 }
