@@ -223,7 +223,7 @@ impl Interpreter {
         match self.apply_function(&callee, args, pos)? {
             Flow::Value(v) => Ok(v),
             Flow::Return(values) => Ok(values.into_iter().next().unwrap_or(Object::Nil)),
-            Flow::Throw(v) => Err(FanError::new(format!("未捕获的抛出：{}", v.inspect()))),
+            Flow::Throw(v) => Err(FanError::new(format!("未恢复的崩溃：{}", v.inspect()))),
             _ => Err(FanError::at("函数调用中断", pos)),
         }
     }

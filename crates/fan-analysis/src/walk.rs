@@ -122,7 +122,6 @@ fn children_of_stmt<'a>(s: &'a St, out: &mut Vec<NodeRef<'a>>) {
             }
         }
         St::Defer(d) => push_expr(out, &d.call),
-        St::Throw(t) => push_expr(out, &t.value),
         St::Visibility(v) => push_stmt(out, &v.inner),
         St::Class(_) | St::Interface(_) | St::Import(_) | St::TypeDef(_) => {}
         St::MethodDef(m) => {

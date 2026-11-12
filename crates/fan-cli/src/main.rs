@@ -292,7 +292,7 @@ mod tests {
         write(
             &dir,
             "乙_测试.凡",
-            "函数 测试乙()\n    抛出 \"故意失败\"\n结束\n",
+            "函数 测试乙()\n    崩溃了(\"故意失败\")\n结束\n",
         );
         let err = run(args(&["测试", &dir.to_string_lossy()])).unwrap_err();
         assert_eq!(err, "测试失败");

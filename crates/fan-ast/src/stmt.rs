@@ -31,7 +31,6 @@ pub enum Stmt {
     Continue(ContinueStmt),
     Return(ReturnStmt),
     Defer(DeferStmt),
-    Throw(ThrowStmt),
     Import(ImportStmt),
     Visibility(VisibilityStmt),
     Class(ClassStmt),
@@ -63,7 +62,6 @@ impl Stmt {
             Stmt::Continue(n) => n.pos,
             Stmt::Return(n) => n.pos,
             Stmt::Defer(n) => n.pos,
-            Stmt::Throw(n) => n.pos,
             Stmt::Import(n) => n.pos,
             Stmt::Visibility(n) => n.pos,
             Stmt::Class(n) => n.pos,
@@ -96,7 +94,6 @@ impl fmt::Display for Stmt {
             Stmt::Continue(n) => n.fmt(f),
             Stmt::Return(n) => n.fmt(f),
             Stmt::Defer(n) => n.fmt(f),
-            Stmt::Throw(n) => n.fmt(f),
             Stmt::Import(n) => n.fmt(f),
             Stmt::Visibility(n) => n.fmt(f),
             Stmt::Class(n) => n.fmt(f),
@@ -421,19 +418,6 @@ pub struct DeferStmt {
 impl fmt::Display for DeferStmt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "稍后 {}", self.call)
-    }
-}
-
-/// `抛出` 语句：抛出运行时崩溃。
-#[derive(Debug, Clone, PartialEq)]
-pub struct ThrowStmt {
-    pub pos: Position,
-    pub value: Expr,
-}
-
-impl fmt::Display for ThrowStmt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "抛出 {}", self.value)
     }
 }
 
@@ -876,18 +860,12 @@ mod tests {
     }
 
     #[test]
-    fn 稍后与抛出显示() {
+    fn 稍后语句显示() {
         let d = DeferStmt {
             pos: pos(),
             call: ident("关闭"),
         };
         assert_eq!(d.to_string(), "稍后 关闭");
-
-        let t = ThrowStmt {
-            pos: pos(),
-            value: ident("错误"),
-        };
-        assert_eq!(t.to_string(), "抛出 错误");
     }
 
     #[test]

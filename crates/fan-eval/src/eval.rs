@@ -35,9 +35,9 @@ pub struct Interpreter {
     ///
     /// 用栈是因为调用可嵌套——内层函数返回时只能执行它自己登记的稍后项。
     defers: Vec<Vec<Deferred>>,
-    /// 稍后块正在处理的抛出值，块内的 `捕获()` 读取它。
+    /// 稍后块正在处理的崩溃值，块内的 `恢复()` 读取它。
     pending_throw: Option<Object>,
-    /// 本次抛出是否已被某个 `捕获()` 取走；取走后不再向外传播。
+    /// 本次崩溃是否已被某个 `恢复()` 取走；取走后不再向外传播。
     throw_caught: bool,
     /// 当前正在执行的方法所属模型名（调用栈），普通函数调用记为 `None`。
     ///
@@ -211,7 +211,7 @@ impl Interpreter {
                 Flow::Break => return Err(FanError::new("跳出 不能出现在循环外")),
                 Flow::Continue => return Err(FanError::new("继续 不能出现在循环外")),
                 Flow::Throw(v) => {
-                    return Err(FanError::new(format!("未捕获的抛出：{}", v.inspect())))
+                    return Err(FanError::new(format!("未恢复的崩溃：{}", v.inspect())))
                 }
                 Flow::Check(v, p) => {
                     return Err(FanError::at(
@@ -256,10 +256,6 @@ impl Interpreter {
             Stmt::Return(r) => self.eval_return(r),
             Stmt::IndexAssign(a) => self.eval_index_assign(a),
             Stmt::FieldAssign(a) => self.eval_field_assign(a),
-            Stmt::Throw(t) => {
-                let v = self.eval_expr(&t.value)?.into_value()?;
-                Ok(Flow::Throw(v))
-            }
             Stmt::TypeDef(t) => self.eval_type_def(t),
             Stmt::Import(i) => self.eval_import(i),
             Stmt::Class(c) => self.eval_class_stmt(c),
@@ -1301,12 +1297,17 @@ impl Interpreter {
     }
 
     fn eval_call(&mut self, n: &ast::CallExpr) -> EvalResult {
-        // `捕获()`：取走稍后块正在处理的抛出值。
+        // `恢复()`：取走稍后块正在处理的崩溃值（原 `捕获()`）。
         // 仅当作用域里没有同名定义时生效，用户自定义的同名函数始终优先。
         if let Expr::Ident(id) = &*n.callee {
-            if id.name == "捕获" && n.args.is_empty() && !self.is_bound(&id.name) {
+            if id.name == "恢复" && n.args.is_empty() && !self.is_bound(&id.name) {
                 self.throw_caught = true;
                 return value(self.pending_throw.clone().unwrap_or(Object::Nil));
+            }
+            // `崩溃了(错误描述)`：以一个规范错误对象触发崩溃（panic 轨），
+            // 可被上层 `稍后` 中的 `恢复()` 接管。仅接受单个字符串描述。
+            if id.name == "崩溃了" && !self.is_bound(&id.name) {
+                return self.eval_crash_call(&n.args, n.pos);
             }
         }
 
@@ -1360,6 +1361,37 @@ impl Interpreter {
                 n.pos,
             )),
         }
+    }
+
+    /// `崩溃了(错误描述)`：构造一个携带当前调用栈的规范错误对象，并以 panic 轨
+    /// 抛出（`Flow::Throw`），可被上层 `稍后` 中的 `恢复()` 接管。
+    ///
+    /// 仅接受单个字符串描述；非字符串先按 `inspect` 文本化，参数个数不符则报错。
+    fn eval_crash_call(&mut self, arg_exprs: &[ast::Expr], pos: fan_ast::Position) -> EvalResult {
+        if arg_exprs.len() != 1 {
+            return Err(FanError::at(
+                format!(
+                    "崩溃了 需要 1 个参数（错误描述），实际 {} 个",
+                    arg_exprs.len()
+                ),
+                pos,
+            ));
+        }
+        let raw = self.eval_expr(&arg_exprs[0])?.into_value()?;
+        let message = match &raw {
+            Object::Str(s) => s.to_string(),
+            other => other.inspect(),
+        };
+        let stack = self.env.borrow().runtime().borrow().stack();
+        let err = fan_object::ErrorValue::new(message);
+        let err = if stack.is_empty() {
+            err
+        } else {
+            let mut e = err;
+            e.stack = stack;
+            e
+        };
+        Ok(Flow::Throw(Object::Error(Rc::new(RefCell::new(err)))))
     }
 
     /// `检查 调用`：调用结果末尾携带错误时，立即向当前函数边界冒泡。
@@ -2329,14 +2361,15 @@ mod tests {
     }
 
     #[test]
-    fn 稍后块内捕获抛出值() {
+    fn 稍后块内恢复崩溃值() {
         check(
             "变量 结果 = \"\"\n\
              函数 执行()\n\
                  稍后 函数()\n\
-                     结果 = 捕获()\n\
+                     变量 异常 = 恢复()\n\
+                     结果 = 异常.消息\n\
                  结束\n\
-                 抛出 \"失败\"\n\
+                 崩溃了(\"失败\")\n\
              结束\n\
              执行()\n\
              结果",
@@ -2345,33 +2378,40 @@ mod tests {
     }
 
     #[test]
-    fn 捕获可取任意实例() {
+    fn 崩溃了构造规范错误对象() {
         check(
-            "模型 自定义异常\n\
-                 属性 字符串 原因\n\
-             结束\n\
-             变量 结果 = \"\"\n\
+            "变量 拿到 = 空\n\
              函数 执行()\n\
                  稍后 函数()\n\
-                     变量 异常 = 捕获()\n\
-                     结果 = 异常.原因\n\
+                     拿到 = 恢复()\n\
                  结束\n\
-                 变量 异常 = 自定义异常()\n\
-                 异常.原因 = \"自定义\"\n\
-                 抛出 异常\n\
+                 崩溃了(\"磁盘满\")\n\
              结束\n\
              执行()\n\
-             结果",
-            "自定义",
+             拿到.消息",
+            "磁盘满",
+        );
+        // 恢复得到的是错误对象，具备错误成员
+        check(
+            "变量 拿到 = 空\n\
+             函数 执行()\n\
+                 稍后 函数()\n\
+                     拿到 = 恢复()\n\
+                 结束\n\
+                 崩溃了(\"x\")\n\
+             结束\n\
+             执行()\n\
+             拿到.错误码",
+            "",
         );
     }
 
     #[test]
-    fn 未捕获的抛出仍然报错() {
-        // 稍后块没有调用 捕获() 时，抛出继续向外传播
-        assert!(run("函数 执行()\n抛出 \"失败\"\n结束\n执行()")
+    fn 未恢复的崩溃仍然报错() {
+        // 稍后块没有调用 恢复() 时，崩溃继续向外传播
+        assert!(run("函数 执行()\n崩溃了(\"失败\")\n结束\n执行()")
             .unwrap_err()
-            .contains("未捕获的抛出"));
+            .contains("未恢复的崩溃"));
     }
 
     #[test]
@@ -2643,35 +2683,35 @@ mod tests {
     }
 
     #[test]
-    fn 跨函数抛出由外层稍后捕获() {
-        // 抛出要能越过函数边界上行，交给外层函数的 稍后/捕获 处理
+    fn 跨函数崩溃由外层稍后恢复() {
+        // 崩溃要能越过函数边界上行，交给外层函数的 稍后/恢复 处理
         check(
             "变量 全局结果 = 空\n\
              函数 内层()\n\
-                 抛出 123\n\
+                 崩溃了(\"深层失败\")\n\
              结束\n\
              函数 外层()\n\
                  稍后 函数()\n\
-                     全局结果 = 捕获()\n\
+                     全局结果 = 恢复().消息\n\
                  结束\n\
                  内层()\n\
              结束\n\
              外层()\n\
              全局结果",
-            "123",
+            "深层失败",
         );
     }
 
     #[test]
-    fn 无人捕获的抛出向外报错() {
-        assert!(run("函数 f()\n    抛出 \"坏\"\n结束\nf()")
+    fn 无人恢复的崩溃向外报错() {
+        assert!(run("函数 f()\n    崩溃了(\"坏\")\n结束\nf()")
             .unwrap_err()
-            .contains("未捕获的抛出"));
+            .contains("未恢复的崩溃"));
     }
 
     #[test]
-    fn 非稍后中的捕获为空() {
-        check("函数 f()\n    返回 捕获()\n结束\nf()", "空");
+    fn 非稍后中的恢复为空() {
+        check("函数 f()\n    返回 恢复()\n结束\nf()", "空");
     }
 
     #[test]
@@ -2780,8 +2820,10 @@ mod tests {
     }
 
     #[test]
-    fn 抛出未捕获报错() {
-        assert!(run("抛出 \"崩溃\"").unwrap_err().contains("未捕获的抛出"));
+    fn 崩溃未恢复报错() {
+        assert!(run("崩溃了(\"崩溃\")")
+            .unwrap_err()
+            .contains("未恢复的崩溃"));
     }
 
     #[test]

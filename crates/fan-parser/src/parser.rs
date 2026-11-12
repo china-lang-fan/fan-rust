@@ -143,7 +143,6 @@ impl Parser {
             TokenType::Repeat => self.parse_repeat_statement(),
             TokenType::ForIn => self.parse_for_each_statement(),
             TokenType::Defer => self.parse_defer_statement(),
-            TokenType::Throw => self.parse_throw_statement(),
             TokenType::Import => self.parse_import_statement(),
             TokenType::Public => self.parse_visibility_statement(Visibility::Public),
             TokenType::Private => self.parse_visibility_statement(Visibility::Private),
@@ -840,22 +839,6 @@ impl Parser {
                 None
             }
         }
-    }
-
-    fn parse_throw_statement(&mut self) -> Option<Stmt> {
-        let pos = self.cur_pos();
-        self.next();
-        if self.cur.type_ == TokenType::Newline || self.cur.type_ == TokenType::Eof {
-            let t = self.cur.clone();
-            self.add_error(&t, "抛出 后需要一个值");
-            return None;
-        }
-        let value = self.parse_expression(LOWEST).or_else(|| {
-            let t = self.cur.clone();
-            self.add_error(&t, "抛出 后需要一个值");
-            None
-        })?;
-        Some(Stmt::Throw(ast::ThrowStmt { pos, value }))
     }
 
     fn parse_import_statement(&mut self) -> Option<Stmt> {
@@ -4097,12 +4080,16 @@ mod tests {
     }
 
     #[test]
-    fn 稍后与抛出语句() {
+    fn 稍后语句解析() {
         let prog = parse_ok("稍后 关闭()");
         assert!(matches!(prog.statements[0], Stmt::Defer(_)));
+    }
 
-        let prog = parse_ok("抛出 错误(\"失败\")");
-        assert!(matches!(prog.statements[0], Stmt::Throw(_)));
+    #[test]
+    fn 崩溃了是普通函数调用而非语句关键字() {
+        // 崩溃了/恢复 已函数化，词法上是普通标识符调用，不再有独立语句节点
+        let prog = parse_ok("崩溃了(\"失败\")");
+        assert!(matches!(prog.statements[0], Stmt::Expr(_)));
     }
 
     #[test]

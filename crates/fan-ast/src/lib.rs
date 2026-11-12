@@ -28,8 +28,8 @@ pub use stmt::{
     AssignStmt, BlockStmt, BreakStmt, ClassStmt, CompoundAssignStmt, ContinueStmt, DeferStmt,
     ExpressionStmt, FieldAssignExpr, FieldDecl, ForEachStmt, IfBranch, IfStmt, ImportStmt,
     IndexAssignStmt, InterfaceMethodSig, InterfaceStmt, MethodDef, MultiAssign, MultiDecl,
-    RepeatStmt, ReturnStmt, Stmt, SwitchBranch, SwitchStmt, ThrowStmt, TimesStmt, TypeDefStmt,
-    VarDecl, Visibility, VisibilityStmt, WhileStmt,
+    RepeatStmt, ReturnStmt, Stmt, SwitchBranch, SwitchStmt, TimesStmt, TypeDefStmt, VarDecl,
+    Visibility, VisibilityStmt, WhileStmt,
 };
 
 /// 一个完整的凡语言程序（一个源文件）。

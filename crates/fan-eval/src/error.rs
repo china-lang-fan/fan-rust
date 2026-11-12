@@ -85,7 +85,7 @@ impl Flow {
             Flow::Return(_) => Err(FanError::new("返回 不能出现在函数外")),
             Flow::Break => Err(FanError::new("跳出 不能出现在循环外")),
             Flow::Continue => Err(FanError::new("继续 不能出现在循环外")),
-            Flow::Throw(v) => Err(FanError::new(format!("未捕获的抛出：{}", v.inspect()))),
+            Flow::Throw(v) => Err(FanError::new(format!("未恢复的崩溃：{}", v.inspect()))),
             Flow::Check(v, _) => Err(FanError::new(format!("未捕获的检查错误：{}", v.inspect()))),
         }
     }
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn 未捕获抛出含值文本() {
         let f = Flow::Throw(fan_object::Object::string("崩溃"));
-        assert_eq!(f.into_value().unwrap_err().message, "未捕获的抛出：崩溃");
+        assert_eq!(f.into_value().unwrap_err().message, "未恢复的崩溃：崩溃");
     }
 
     #[test]

@@ -141,9 +141,7 @@ pub fn specs() -> Vec<NativeSpec> {
                         }
                     }
                 }
-                Ok(vec![Object::Error(Rc::new(std::cell::RefCell::new(
-                    value,
-                )))])
+                Ok(vec![Object::Error(Rc::new(std::cell::RefCell::new(value)))])
             }),
         ),
         // 失败：直接以错误中断当前函数

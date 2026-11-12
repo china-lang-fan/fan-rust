@@ -325,7 +325,7 @@ mod tests {
         let path = write(
             &dir,
             "乙_测试.凡",
-            "函数 测试乙()\n    抛出 \"故意失败\"\n结束\n",
+            "函数 测试乙()\n    崩溃了(\"故意失败\")\n结束\n",
         );
         let result = run_file(&path);
         assert_eq!(result.tests.len(), 1);
