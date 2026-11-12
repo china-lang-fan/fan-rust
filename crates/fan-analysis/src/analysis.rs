@@ -8,6 +8,7 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::index::Index;
 use crate::mixfixcheck::check_mixfix_spacing;
 use crate::nativecheck::check_native_bindings;
+use crate::tagcheck::check_unknown_tags;
 
 /// 对单份源码做完整静态分析（无真实文件 URI，导入解析能力有限）。
 pub fn analyze(source: &str) -> Vec<Diagnostic> {
@@ -27,6 +28,7 @@ pub fn analyze_index(index: &Index) -> Vec<Diagnostic> {
 
     diags.extend(check_mixfix_spacing(&prog));
     diags.extend(check_native_bindings(&prog));
+    diags.extend(check_unknown_tags(&prog));
     diags.extend(index.root().check_imports(index));
     diags.extend(index.root().check_undefined_names());
     diags.extend(index.check_embed_ambiguity());

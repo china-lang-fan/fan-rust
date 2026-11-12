@@ -6,7 +6,7 @@
 //! # 为何单独分组
 //!
 //! 解释器本体**零第三方依赖**。只有在凡代码引用了某扩展模块的原生函数时
-//! （`@内建("正则.regexMatch")`），才会去加载对应的动态库；不使用扩展能力
+//! （`定义 本地("正则.regexMatch") 函数 ...`），才会去加载对应的动态库；不使用扩展能力
 //! 的程序完全不触碰这些依赖。这也让扩展库能独立分发与更新。
 //!
 //! # 加载机制
@@ -35,7 +35,7 @@ pub const LIB_PREFIX: &str = "fan_ext_";
 
 /// 模块名 → 动态库名。
 ///
-/// 凡代码写的模块名（`@内建("正则.regexMatch")` 里的 `正则`）可以是中文，而
+/// 凡代码写的模块名（`定义 本地("正则.regexMatch") ...` 里的 `正则`）可以是中文，而
 /// ASCII 更稳妥（跨平台、构建工具兼容），故在此固定别名。
 pub fn lib_name(module: &str) -> &str {
     match module {
@@ -178,7 +178,7 @@ impl ExtRegistry {
     ///
     /// **回落策略**：优先加载扩展动态库；找不到（或平台不支持）时改用
     /// [`default`] 中的纯标准库实现。两者都没有才报错。这样凡代码写
-    /// `@内建("json.jsonEncode")` 后，无论目标环境是否部署了扩展库都能运行。
+    /// `定义 本地("json.jsonEncode") 函数 ...` 后，无论目标环境是否部署了扩展库都能运行。
     pub fn ensure(&mut self, rt: &mut Runtime, module: &str) -> Result<ExtSource, String> {
         if let Some(source) = self.source_of(module) {
             return Ok(source);

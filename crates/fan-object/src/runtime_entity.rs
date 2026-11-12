@@ -42,7 +42,7 @@ pub struct Function {
     /// 已绑定的接收者。模型方法为实例；为基本类型定义的方法则直接是那个值
     /// （字符串、数组等），因此这里不限制为 `Instance`。
     pub self_value: Option<Object>,
-    /// `@内建` 标签绑定的原生实现；存在时调用函数即转调原生函数。
+    /// `定义 本地(...)` 绑定的原生实现；存在时调用函数即转调原生函数。
     pub native_impl: Option<Rc<Builtin>>,
     /// 作为方法时所归属的模型。
     pub owner: Option<Rc<Class>>,
@@ -416,7 +416,7 @@ pub type NativeImpl = Rc<dyn Fn(&mut crate::Runtime, Vec<Object>) -> Result<Vec<
 
 /// 内建函数分组。
 ///
-/// 解释器只内置 `Core` 组；`Ext` 组位于独立动态库，由 `@内建("模块名.函数名")`
+/// 解释器只内置 `Core` 组；`Ext` 组位于独立动态库，由 `定义 本地("模块名.函数名") 函数 ...`
 /// 按需加载，因此不使用扩展能力的程序无需加载任何第三方依赖。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NativeGroup {
@@ -441,7 +441,7 @@ impl std::fmt::Display for NativeGroup {
 /// 新增内建只需构造一个 `NativeSpec` 并加入所属组的 `specs()` 列表。
 #[derive(Clone)]
 pub struct NativeSpec {
-    /// 原生名，与 `@内建("名字")` 的参数一致。
+    /// 原生名，与 `定义 本地("名字") ...` 的绑定名一致。
     pub name: &'static str,
     /// 最少参数个数；`None` 表示不校验。
     pub arity: Option<usize>,

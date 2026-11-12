@@ -107,7 +107,7 @@ impl Interpreter {
                         stmt.pos,
                     )
                 };
-                // 方法同样支持 `@内建`：原生实现会收到接收者作为首个实参。
+                // 应用方法上的自定义标签处理器（未注册标签静默忽略）。
                 self.process_function_tags(&mut func)?;
                 if cls.methods.contains_key(&stmt.method_name) {
                     return Err(FanError::at(
@@ -170,7 +170,7 @@ impl Interpreter {
                 stmt.pos,
             )
         };
-        // 基本类型方法同样支持 `@内建`：原生实现会收到接收者作为首个实参。
+        // 应用基本类型方法上的自定义标签处理器（未注册标签静默忽略）。
         self.process_function_tags(&mut func)?;
         let rt = self.env.borrow().runtime();
         rt.borrow_mut()

@@ -22,7 +22,7 @@ pub struct Interpreter {
     pub loader: Rc<RefCell<crate::module::Loader>>,
     /// 标签处理器注册表。
     pub tags: crate::tag::TagRegistry,
-    /// 扩展动态库登记表：仅在 `@内建` 引用了该模块的原生函数时才加载。
+    /// 扩展动态库登记表：仅在 `定义 本地("模块.函数")` 引用了该模块的原生函数时才加载。
     ///
     /// 与主程序、各子模块共享同一份：动态库一旦加载就无法卸载，登记表是
     /// 进程级状态，若各自持有会导致同一库被重复登记。
@@ -173,7 +173,7 @@ impl Interpreter {
     /// 注册 `core` 组内建（纯标准库实现），并补上 `打印`/`打印行`。
     ///
     /// `打印`/`打印行` 是语言内置输出能力，无需导入模块即可调用；标准库
-    /// `系统.凡` 的 `打印` 则通过 `@内建("print")` 绑定到同一份实现。
+    /// `系统.凡` 的 `打印` 则通过 `定义 本地("print") 函数 ...` 绑定到同一份实现。
     fn register_core_natives(&self) {
         let rt = self.env.borrow().runtime();
         let mut rt = rt.borrow_mut();
@@ -1233,7 +1233,7 @@ impl Interpreter {
             group_sizes: n.group_sizes.clone(),
             signature: n.signature.clone(),
         };
-        // `@内建` 会把原生实现挂到函数上，此后调用不再执行函数体。
+        // 应用自定义标签处理器（未注册标签静默忽略）。
         self.process_function_tags(&mut fn_obj)?;
         // `定义 本地(...)`：native 优先；找不到原生实现时保持 None，
         // 调用即回退执行函数体（见 apply_function 的 native_impl 分派）。
@@ -1396,7 +1396,7 @@ impl Interpreter {
         };
         let fn_obj = f.clone();
 
-        // `@内建` 绑定的函数直接转调原生实现，不再执行函数体。
+        // `定义 本地(...)` 绑定了原生实现的函数直接转调，不再执行函数体。
         if fn_obj.native_impl.is_some() {
             return self.call_native_impl(&fn_obj, args, pos);
         }

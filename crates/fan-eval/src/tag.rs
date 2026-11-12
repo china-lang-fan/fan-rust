@@ -4,25 +4,20 @@
 //! 处理器框架：每种标签名对应一个 [`TagHandler`]，通过 [`TagRegistry`] 分发。
 //! 新增标签只需实现 `TagHandler` 并注册，无需改动求值器。
 //!
-//! 当前内置一种标签：
+//! 旧的 `@内建("名字")` 标签已移除：原生函数改由
+//! `定义 本地("模块.函数") 函数 ...` 声明绑定（见 `eval::Interpreter::bind_native`），
+//! 因此默认注册表不再内置任何处理器。标签框架本身保留，供 `@测试`（testrun 在
+//! AST 层静态识别）、切面等自定义标签使用；遇到未注册标签时静默忽略，由 LSP
+//! 静态分析负责告警。
 //!
-//! | 标签 | 作用 |
-//! |---|---|
-//! | `@内建("名字")` | 把函数绑定到原生实现，名字可带模块前缀，见 [`BuiltinTag`] |
-//!
-//! 对应 Go 版 `evaluator/tag.go`。Go 版把标签建模为「标签模型 + 处理器 +
-//! 可替换调用目标」的通用机制，而凡语言标准库实际只用这一种用途，因此这里
-//! 保留同样的扩展点，但只落地需要的两个处理器。
+//! 对应 Go 版 `evaluator/tag.go`。
 
 use crate::error::FanError;
 use crate::eval::Interpreter;
-use fan_ast::{Expr, TagExpr};
+use fan_ast::TagExpr;
 use fan_object::{Function, Object};
 use std::collections::HashMap;
 use std::rc::Rc;
-
-/// `@内建` 标签名。
-pub const 内建标签: &str = "内建";
 
 /// 标签应用的上下文：解释器、被标注的函数、标签本身。
 pub struct TagContext<'a> {
@@ -41,25 +36,20 @@ pub trait TagHandler {
 }
 
 /// 标签注册表：标签名 → 处理器。
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct TagRegistry {
     handlers: HashMap<String, Rc<dyn TagHandler>>,
 }
 
-impl Default for TagRegistry {
-    fn default() -> Self {
-        TagRegistry::with_builtins()
-    }
-}
-
 impl TagRegistry {
-    /// 创建只含解释器内置标签的注册表。
+    /// 创建空注册表。
+    ///
+    /// 原生函数已改由 `定义 本地(...)` 绑定，框架不再内置任何标签处理器；
+    /// 名称保留以表达「解释器自带的注册表」这一语义。
     pub fn with_builtins() -> Self {
-        let mut registry = TagRegistry {
+        TagRegistry {
             handlers: HashMap::new(),
-        };
-        registry.register(Rc::new(BuiltinTag));
-        registry
+        }
     }
 
     /// 注册一个标签处理器；同名会被覆盖。
@@ -73,97 +63,16 @@ impl TagRegistry {
     }
 
     /// 按标签名分派。
+    ///
+    /// 未注册的标签静默忽略（返回 `Ok(())`），不影响声明求值；对未知标签的
+    /// 提示由 LSP 静态分析负责。
     pub fn dispatch(&self, ctx: &mut TagContext<'_>) -> Result<(), FanError> {
         let name = ctx.tag.type_name.clone();
         match self.handlers.get(&name) {
             Some(handler) => handler.apply(ctx),
-            None => Err(FanError::at(
-                format!("未定义标签处理器：{}", name),
-                ctx.tag.pos,
-            )),
+            None => Ok(()),
         }
     }
-}
-
-/// `@内建("名字")`：把函数绑定到原生实现。
-///
-/// 名字统一用英文，可写成 `模块名.函数名`：
-///
-/// - 写了模块名：按模块名加载扩展库（找不到库则回落内置默认实现），
-///   再从中取指定的原生函数；
-/// - 不写模块名：只取系统已注册的（`core` 组）内建，不做模块反查。
-///
-/// 绑定后调用该函数将转调原生实现，函数体不再执行。
-struct BuiltinTag;
-
-impl TagHandler for BuiltinTag {
-    fn name(&self) -> &str {
-        内建标签
-    }
-
-    fn apply(&self, ctx: &mut TagContext<'_>) -> Result<(), FanError> {
-        let spec = string_arg(ctx.tag)?;
-        let pos = ctx.tag.pos;
-        // 名字可写成 `模块名.函数名`：模块名用于加载对应的扩展库（找不到
-        // 扩展库时回落到内置默认实现），函数名指定其中的原生函数。
-        // 不写模块名时，只取系统已注册的（core 组）内建。
-        let (module, native_name) = match spec.split_once('.') {
-            Some((m, f)) if !m.is_empty() && !f.is_empty() => (Some(m.to_string()), f.to_string()),
-            _ => (None, spec.clone()),
-        };
-
-        let rt = ctx.interp.env.borrow().runtime();
-        if let Some(module) = &module {
-            let loaded = {
-                let mut rt_mut = rt.borrow_mut();
-                ctx.interp.ext.borrow_mut().ensure(&mut rt_mut, module)
-            };
-            loaded.map_err(|e| FanError::at(e, pos))?;
-        }
-
-        let builtin = match rt.borrow().lookup_native(&native_name) {
-            Some(b) => b,
-            // 写了模块名却仍找不到：该模块里没有这个函数
-            None if module.is_some() => {
-                return Err(FanError::at(
-                    format!(
-                        "模块 {} 中没有原生函数 {}",
-                        module.unwrap_or_default(),
-                        native_name
-                    ),
-                    pos,
-                ))
-            }
-            // 未写模块名又不在已注册的内建里：提示可以补上模块名
-            None => {
-                return Err(FanError::at(
-                    format!(
-                        "标签 @{} 引用的原生函数 {} 未注册；\
-                         若它属于扩展模块，请写成「模块名.函数名」",
-                        内建标签, native_name
-                    ),
-                    pos,
-                ))
-            }
-        };
-        ctx.func.native_impl = Some(builtin);
-        Ok(())
-    }
-}
-
-/// 取标签的第一个字符串位置参数。
-pub fn string_arg(tag: &TagExpr) -> Result<String, FanError> {
-    if let Some(Expr::Str(s)) = tag.positional.first() {
-        return Ok(s.value.to_string());
-    }
-    if let Some(Expr::InterpStr(s)) = tag.positional.first() {
-        // 插值串退化为连接其字面分段
-        return Ok(s.parts.concat());
-    }
-    Err(FanError::at(
-        format!("@{} 需要一个字符串参数", tag.type_name),
-        tag.pos,
-    ))
 }
 
 impl Interpreter {
@@ -187,9 +96,9 @@ impl Interpreter {
         Ok(())
     }
 
-    /// 调用带 `@内建` 绑定的函数：转调原生实现。
+    /// 调用带原生绑定（`定义 本地(...)`）的函数：转调原生实现。
     ///
-    /// 方法形式的内建会把接收者作为第一个实参传入。
+    /// 方法形式会把接收者作为第一个实参传入。
     pub(crate) fn call_native_impl(
         &mut self,
         func: &Function,
@@ -217,43 +126,24 @@ impl Interpreter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eval::Interpreter;
-    use fan_object::{Builtin, Runtime};
-    use fan_parser::parse_program;
+    use fan_ast::Position;
 
-    /// 注册一个把整数加倍的原生函数 `double`，模拟 core 组内建。
-    fn interp_with_native() -> Interpreter {
-        let interp = Interpreter::new();
-        let rt = interp.env.borrow().runtime();
-        rt.borrow_mut().register_native(Rc::new(Builtin::new(
-            "double",
-            Some(1),
-            Rc::new(|_rt, args| {
-                let n = args.first().and_then(|a| a.as_int()).unwrap_or(0);
-                Ok(vec![Object::int(n * 2)])
-            }),
-        )));
-        interp
-    }
-
-    fn check(src: &str, expected: &str) {
-        let (program, errors) = parse_program(src);
-        assert!(errors.is_empty(), "解析错误：{errors}");
-        let mut interp = interp_with_native();
-        match interp.run(&program) {
-            Ok(v) => assert_eq!(v.inspect(), expected, "源码：{src}"),
-            Err(e) => panic!("执行失败：{}\n源码：{src}", e.display()),
+    /// 构造一个带指定标签名的标签表达式。
+    fn tag_named(type_name: &str) -> TagExpr {
+        TagExpr {
+            pos: Position::START,
+            type_name: type_name.to_string(),
+            positional: vec![],
+            named: vec![],
         }
     }
 
     // ------------------------------------------------------ 框架单元测试
 
     #[test]
-    fn 注册表默认含内置标签() {
+    fn 默认注册表为空() {
         let registry = TagRegistry::with_builtins();
-        let mut names = registry.names();
-        names.sort_unstable();
-        assert_eq!(names, vec![内建标签]);
+        assert!(registry.names().is_empty());
     }
 
     #[test]
@@ -274,20 +164,9 @@ mod tests {
         assert!(registry.names().contains(&"标记"));
 
         // 验证自定义处理器确实生效
-        let mut interp = interp_with_native();
-        let mut func = Function::new(
-            "甲",
-            vec![],
-            Default::default(),
-            None,
-            fan_ast::Position::START,
-        );
-        let tag = TagExpr {
-            pos: fan_ast::Position::START,
-            type_name: "标记".to_string(),
-            positional: vec![],
-            named: vec![],
-        };
+        let mut interp = Interpreter::new();
+        let mut func = Function::new("甲", vec![], Default::default(), None, Position::START);
+        let tag = tag_named("标记");
         let mut ctx = TagContext {
             interp: &mut interp,
             func: &mut func,
@@ -298,225 +177,24 @@ mod tests {
     }
 
     #[test]
-    fn 未注册的标签名报错() {
+    fn 未注册的标签名静默忽略() {
         let registry = TagRegistry::with_builtins();
-        let mut interp = interp_with_native();
-        let mut func = Function::new(
-            "甲",
-            vec![],
-            Default::default(),
-            None,
-            fan_ast::Position::START,
-        );
-        let tag = TagExpr {
-            pos: fan_ast::Position::START,
-            type_name: "不存在".to_string(),
-            positional: vec![],
-            named: vec![],
-        };
+        let mut interp = Interpreter::new();
+        let mut func = Function::new("甲", vec![], Default::default(), None, Position::START);
+        let tag = tag_named("不存在");
         let mut ctx = TagContext {
             interp: &mut interp,
             func: &mut func,
             tag: &tag,
         };
-        assert!(registry
-            .dispatch(&mut ctx)
-            .unwrap_err()
-            .display()
-            .contains("未定义标签处理器"));
+        // 不再报错：未注册标签静默忽略
+        registry.dispatch(&mut ctx).unwrap();
+        assert_eq!(func.name, "甲");
     }
 
     #[test]
-    fn 字符串参数解析支持字面量() {
-        let tag = TagExpr {
-            pos: fan_ast::Position::START,
-            type_name: 内建标签.to_string(),
-            positional: vec![Expr::Str(fan_ast::StringLit {
-                pos: fan_ast::Position::START,
-                value: "double".to_string(),
-            })],
-            named: vec![],
-        };
-        assert_eq!(string_arg(&tag).unwrap(), "double");
-    }
-
-    #[test]
-    fn 缺少字符串参数报错() {
-        let tag = TagExpr {
-            pos: fan_ast::Position::START,
-            type_name: 内建标签.to_string(),
-            positional: vec![Expr::Integer(fan_ast::IntegerLit {
-                pos: fan_ast::Position::START,
-                value: 42,
-            })],
-            named: vec![],
-        };
-        assert!(string_arg(&tag)
-            .unwrap_err()
-            .display()
-            .contains("需要一个字符串参数"));
-    }
-
-    // ------------------------------------------------------ 端到端
-
-    #[test]
-    fn 内建绑定后不执行函数体() {
-        check(
-            "@内建(\"double\")\n函数 加倍(任意 数) -> 整数\n    返回 0\n结束\n加倍(5)",
-            "10",
-        );
-    }
-
-    #[test]
-    fn 未注册的原生名报错() {
-        let (program, _) = parse_program("@内建(\"nope\")\n函数 加倍(任意 数)\n    返回 0\n结束\n");
-        let mut interp = interp_with_native();
-        assert!(interp
-            .run(&program)
-            .unwrap_err()
-            .display()
-            .contains("未注册"));
-    }
-
-    // ------------------------------------------------------ @内建 的模块名
-
-    #[test]
-    fn 内建标签可写模块名前缀() {
-        // `模块名.函数名`：模块名用于加载扩展库，没有库时回落内置默认实现
-        check(
-            "@内建(\"json.jsonEncode\")\n函数 生成(任意 值)\n    返回 空\n结束\n生成([1, 2])",
-            "([1,2], 空)",
-        );
-    }
-
-    #[test]
-    fn 内建标签不写模块名时只取已注册内建() {
-        // 不写模块名：只用系统已注册的（core 组）内建，不再按函数名反查模块
-        check(
-            "@内建(\"double\")\n函数 加倍(任意 数)\n    返回 空\n结束\n加倍(4)",
-            "8",
-        );
-    }
-
-    #[test]
-    fn 内建标签不写模块名时扩展内建报错并提示() {
-        // 扩展模块的内建必须写模块名，否则报错并提示正确写法
-        let (program, _) =
-            parse_program("@内建(\"jsonEncode\")\n函数 生成(任意 值)\n    返回 0\n结束\n");
-        let mut interp = interp_with_native();
-        let err = interp.run(&program).unwrap_err().display();
-        assert!(err.contains("模块名.函数名"), "实际：{}", err);
-    }
-
-    #[test]
-    fn 内建标签的模块名不存在时报错() {
-        let (program, _) =
-            parse_program("@内建(\"不存在的模块.某某\")\n函数 甲()\n    返回 0\n结束\n");
-        let mut interp = interp_with_native();
-        let err = interp.run(&program).unwrap_err().display();
-        assert!(err.contains("既没有扩展库"), "实际：{}", err);
-    }
-
-    #[test]
-    fn 内建标签的函数名不在模块中时报错() {
-        let (program, _) = parse_program("@内建(\"json.不存在\")\n函数 甲()\n    返回 0\n结束\n");
-        let mut interp = interp_with_native();
-        let err = interp.run(&program).unwrap_err().display();
-        assert!(err.contains("没有原生函数"), "实际：{}", err);
-    }
-
-    #[test]
-    fn 未知标签名报错() {
-        let (program, _) = parse_program("@自定义\n函数 加倍(任意 数)\n    返回 0\n结束\n");
-        let mut interp = interp_with_native();
-        assert!(interp
-            .run(&program)
-            .unwrap_err()
-            .display()
-            .contains("未定义标签处理器"));
-    }
-
-    #[test]
-    fn 无标签的函数照常执行函数体() {
-        check(
-            "函数 加倍(任意 数) -> 整数\n    返回 数 乘 2\n结束\n加倍(4)",
-            "8",
-        );
-    }
-
-    #[test]
-    fn 解释器的标签注册表可用() {
+    fn 解释器的标签注册表默认为空() {
         let interp = Interpreter::new();
-        assert!(interp.tags.names().contains(&内建标签));
-    }
-
-    #[test]
-    fn 原生实现可由运行实例共享() {
-        let rt = Rc::new(std::cell::RefCell::new(Runtime::new()));
-        rt.borrow_mut().register_native(Rc::new(Builtin::new(
-            "triple",
-            Some(1),
-            Rc::new(|_rt, args| {
-                let n = args.first().and_then(|a| a.as_int()).unwrap_or(0);
-                Ok(vec![Object::int(n * 3)])
-            }),
-        )));
-        assert!(rt.borrow().lookup_native("triple").is_some());
-        assert!(rt.borrow().lookup_native("missing").is_none());
-    }
-
-    // ------------------------------------------------ 本地(native) 关键字
-
-    #[test]
-    fn 本地命中原生时不执行函数体() {
-        // double 已在 interp_with_native 注册：应走原生（5*2），忽略函数体的 0。
-        check(
-            "定义 本地(\"double\") 函数 加倍(任意 数) -> 整数\n    返回 0\n结束\n加倍(5)",
-            "10",
-        );
-    }
-
-    #[test]
-    fn 本地无模块前缀且未注册时回退函数体() {
-        // 静默回退：nope 不在 core 内建，执行函数体返回 7，不报错。
-        check(
-            "定义 本地(\"nope\") 函数 加倍(任意 数) -> 整数\n    返回 7\n结束\n加倍(5)",
-            "7",
-        );
-    }
-
-    #[test]
-    fn 本地模块中无此函数时回退函数体() {
-        // json 模块会加载默认实现，但其中没有「不存在」函数：回退函数体。
-        check(
-            "定义 本地(\"json.不存在\") 函数 甲() -> 整数\n    返回 9\n结束\n甲()",
-            "9",
-        );
-    }
-
-    #[test]
-    fn 本地带模块前缀命中默认实现() {
-        // json.jsonEncode 由扩展默认实现提供，native 命中：函数体被忽略。
-        check(
-            "定义 本地(\"json.jsonEncode\") 函数 生成(任意 值)\n    返回 空\n结束\n生成([1, 2])",
-            "([1,2], 空)",
-        );
-    }
-
-    #[test]
-    fn 本地缺失模块加载失败时回退函数体() {
-        // 不存在的模块：ensure 失败被吞掉，回退函数体，不产生运行时错误。
-        check(
-            "定义 本地(\"不存在的模块.某某\") 函数 甲() -> 整数\n    返回 3\n结束\n甲()",
-            "3",
-        );
-    }
-
-    #[test]
-    fn 普通函数不受本地机制影响() {
-        check(
-            "函数 加倍(任意 数) -> 整数\n    返回 数 乘 2\n结束\n加倍(4)",
-            "8",
-        );
+        assert!(interp.tags.names().is_empty());
     }
 }

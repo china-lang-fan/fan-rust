@@ -35,6 +35,8 @@ pub mod query;
 pub mod scope;
 /// 符号与符号种类。
 pub mod symbol;
+/// 未知标签的静态告警（含废弃的 `@内建`）。
+pub mod tagcheck;
 /// LSP 列换算与光标词定位。
 pub mod utf16;
 /// AST 遍历工具（子节点枚举与深度优先遍历）。

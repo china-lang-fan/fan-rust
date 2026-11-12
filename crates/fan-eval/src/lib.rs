@@ -17,7 +17,6 @@ pub use error::{EvalResult, FanError, Flow};
 pub use eval::Interpreter;
 pub use module::{default_modules_dirs, module_name_from_path, Loader};
 pub use oop::{convert_to_named, convert_to_primitive_kind, value_is_type};
-pub use tag::内建标签;
 
 use fan_ast::Program;
 use fan_object::Object;
