@@ -3,6 +3,7 @@
 //! ```text
 //! fan 运行 <脚本.凡> [参数...]   执行脚本
 //! fan 测试 [目录或文件]          执行 *_测试.凡 中的测试函数
+//! fan 检查 [目录或文件]          静态检查，不运行即可发现未定义名、坏导入等问题
 //! fan 交互                      进入交互式求值（REPL）
 //! fan lsp                       启动语言服务器（LSP/stdio）
 //! fan 版本                      输出版本
@@ -47,6 +48,10 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let target = args.get(1).map(|s| s.as_str()).unwrap_or(".");
             run_tests(target)
         }
+        "检查" | "check" => {
+            let target = args.get(1).map(|s| s.as_str()).unwrap_or(".");
+            run_check(target)
+        }
         "交互" | "repl" => run_repl(BufReader::new(std::io::stdin()), std::io::stdout()),
         "lsp" => run_lsp(),
         "版本" | "version" | "-v" | "--version" => {
@@ -72,6 +77,7 @@ fn usage_text() -> String {
           用法：\n\
           \x20 fan 运行 <脚本.凡> [参数...]   执行脚本\n\
           \x20 fan 测试 [目录或文件]          执行 *_测试.凡 中的测试函数\n\
+          \x20 fan 检查 [目录或文件]          静态检查（不运行），报告未定义名、坏导入等\n\
           \x20 fan 交互                      进入交互式求值（REPL）\n\
           \x20 fan lsp                       启动语言服务器（LSP/stdio）\n\
           \x20 fan 版本                      输出版本\n\
@@ -133,6 +139,115 @@ fn run_tests(target: &str) -> Result<(), String> {
         return Err("测试失败".to_string());
     }
     Ok(())
+}
+
+/// 静态检查：不运行程序，扫描目标下全部 `.凡`/`.fan` 文件并报告静态诊断。
+///
+/// 复用编辑器（LSP）同源的 `fan-analysis`：未定义名、坏导入、语法错误、
+/// 复合字面量与嵌入歧义等。出现 Error 级诊断时以非零码退出，便于接入 CI 门禁；
+/// Warning 级只提示、不影响退出码。
+fn run_check(target: &str) -> Result<(), String> {
+    let root = std::path::absolute(Path::new(target))
+        .map_err(|e| format!("路径 {} 无法解析：{}", target, e))?;
+    if !root.exists() {
+        return Err(format!("目标不存在：{}", target));
+    }
+    let paths = discover_fan_files(&root);
+    if paths.is_empty() {
+        println!("未找到可检查的 .凡/.fan 文件：{}", target);
+        return Ok(());
+    }
+
+    // 模块导入路径相对「工程根」解析（与运行时 FAN_SDK 语义对齐）：目录模式以
+    // 目标目录为根，单文件模式以其所在目录为根。整工程共享同一模块搜索基目录。
+    let base: &Path = if root.is_dir() {
+        &root
+    } else {
+        root.parent().unwrap_or(Path::new("."))
+    };
+
+    let mut error_count = 0usize;
+    let mut warning_count = 0usize;
+    for path in &paths {
+        let source = std::fs::read_to_string(path)
+            .map_err(|e| format!("无法读取 {}: {}", path.display(), e))?;
+        let uri = fan_analysis::paths::path_to_uri(&path.to_string_lossy());
+        let index = fan_analysis::Index::build_with_base(base, &uri, &source);
+        let diagnostics = fan_analysis::analyze_index(&index);
+        if diagnostics.is_empty() {
+            continue;
+        }
+        println!("{}", path.display());
+        for d in &diagnostics {
+            match d.severity {
+                fan_analysis::Severity::Error => {
+                    error_count += 1;
+                    println!("  ✗ 第{}行第{}列：{}", d.line, d.column, d.message);
+                }
+                _ => {
+                    warning_count += 1;
+                    println!("  · 第{}行第{}列：{}", d.line, d.column, d.message);
+                }
+            }
+        }
+    }
+
+    println!(
+        "\n扫描 {} 个文件，{} 个问题（错误 {}，警告 {}）",
+        paths.len(),
+        error_count + warning_count,
+        error_count,
+        warning_count
+    );
+    if error_count > 0 {
+        return Err("静态检查未通过".to_string());
+    }
+    Ok(())
+}
+
+/// 发现目标下的全部凡语言源文件（含库与测试），按路径排序。
+fn discover_fan_files(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    if root.is_file() {
+        if is_fan_file(root) {
+            paths.push(root.to_path_buf());
+        }
+        return paths;
+    }
+    collect_fan_dir(root, &mut paths);
+    paths.sort();
+    paths
+}
+
+fn collect_fan_dir(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.')
+                || name == "node_modules"
+                || name == "vendor"
+                || name == "target"
+            {
+                continue;
+            }
+            collect_fan_dir(&path, out);
+        } else if is_fan_file(&path) {
+            out.push(path);
+        }
+    }
+}
+
+fn is_fan_file(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    name.ends_with(".凡") || name.ends_with(".fan")
 }
 
 /// 交互式求值：逐行读取、在同一解释器上累积状态。
@@ -337,5 +452,80 @@ mod tests {
         let result =
             fan_lsp::Server::new().run(&mut std::io::Cursor::new(Vec::new()), Vec::<u8>::new());
         assert!(result.is_ok(), "空输入应正常结束：{result:?}");
+    }
+
+    #[test]
+    fn 检查干净工程通过且零退出() {
+        let dir = temp_dir("check-ok");
+        write(
+            &dir,
+            "好.凡",
+            "函数 加一(整数 x) -> 整数\n    返回 x 加 1\n结束\n变量 y = 加一(1)\n",
+        );
+        assert!(run(args(&["检查", &dir.to_string_lossy()])).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 检查坏导入报错且非零退出() {
+        let dir = temp_dir("check-import");
+        write(
+            &dir,
+            "主.凡",
+            "导入 \"不存在的模块\" 作为 幽灵\n变量 x = 1\n",
+        );
+        let err = run(args(&["检查", &dir.to_string_lossy()])).unwrap_err();
+        assert_eq!(err, "静态检查未通过");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 检查语法错误报错且非零退出() {
+        let dir = temp_dir("check-syntax");
+        write(&dir, "坏.凡", "变量 x = =\n");
+        let err = run(args(&["检查", &dir.to_string_lossy()])).unwrap_err();
+        assert_eq!(err, "静态检查未通过");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 检查单文件模式() {
+        let dir = temp_dir("check-file");
+        let path = write(&dir, "好.凡", "变量 y = 1\n");
+        assert!(run(args(&["检查", &path])).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 检查不存在的目标报错() {
+        let err = run(args(&["检查", "/tmp/opencode/肯定不存在的 fan 目录"])).unwrap_err();
+        assert!(err.contains("目标不存在"), "实际：{err}");
+    }
+
+    #[test]
+    fn 检查空目录正常通过() {
+        let dir = temp_dir("check-empty");
+        assert!(run(args(&["检查", &dir.to_string_lossy()])).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 检查工程根相对导入能解析() {
+        // 工程根下 库/子目录里的模块用「库/xxx」根相对导入，应以工程根为搜索基目录，
+        // 不应误报找不到模块。
+        let dir = temp_dir("check-imports-root");
+        std::fs::create_dir_all(dir.join("库")).unwrap();
+        write(
+            &dir,
+            "库/系统.凡",
+            "函数 版本号() -> 字符串\n    返回 \"1\"\n结束\n",
+        );
+        write(
+            &dir,
+            "库/应用.凡",
+            "导入 \"库/系统\" 作为 系统\n变量 v = 系统.版本号()\n",
+        );
+        assert!(run(args(&["检查", &dir.to_string_lossy()])).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
