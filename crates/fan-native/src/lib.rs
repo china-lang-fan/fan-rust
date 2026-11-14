@@ -11,17 +11,18 @@
 //! - 宿主环境交互（文件系统、进程、时间、网络）
 //! - 运行时反射（取类型名）
 //! - 解释器内部能力（输出、构造带调用栈的错误）
-//! - 已有成熟实现且自行实现代价过高的（正则引擎、JSON 解析）
+//! - 已有成熟实现且自行实现代价过高的（正则引擎、JSON 解析、HTTP 客户端）
 //!
-//! **2. 内建函数分两组。**
+//! **2. 内建函数分两组，但都静态编入解释器。**
 //!
-//! | 组 | 依赖 | 交付形态 | 加载时机 |
-//! |---|---|---|---|
-//! | [`core`] | 仅 Rust 标准库 | 编译进解释器 | 启动时注册，始终可用 |
-//! | [`ext`] | 第三方 crate | 独立动态库 | `定义 本地("模块名.函数名") 函数 ...` 触发，按需加载 |
+//! | 组 | 依赖 | 注册时机 |
+//! |---|---|---|
+//! | [`core`] | 仅 Rust 标准库 | 启动时注册，始终可用 |
+//! | [`ext`] | 第三方 crate（`regex`/`serde_json`/`ureq`） | 同样在启动时注册 |
 //!
-//! 未引用 `ext` 组内建的程序**不会**加载任何扩展依赖，因此解释器本体保持
-//! 零第三方依赖。
+//! 两组没有加载方式差别，更没有 FFI 边界与动态库：`ext` 只是「依赖第三方
+//! crate 的内建」的来源标记。凡代码统一以 `定义 本地("名字")`（core 裸名）
+//! 或 `定义 本地("模块.函数")`（ext 模块前缀）绑定，运行时查同一张原生函数表。
 //!
 //! **3. 所有内建通过统一描述符注册。** 新增一个内建只需在对应组的
 //! `specs()` 里追加一项，无需改动注册框架。
@@ -29,23 +30,29 @@
 pub mod core;
 pub mod ext;
 
-pub use ext::ExtRegistry;
 pub use fan_object::NativeImpl;
 
 use fan_object::{Builtin, NativeSpec, Runtime};
 use std::rc::Rc;
 
-/// 把 `core` 组（纯 Rust 标准库）的全部内建注册到运行实例。
-///
-/// `ext` 组不在此注册——它们由 `定义 本地("模块名.函数名") 函数 ...` 在首次引用时动态加载。
-pub fn register_core(rt: &mut Runtime) {
-    for spec in core::specs() {
+/// 把一组描述符登记为内建。
+fn register_specs(rt: &mut Runtime, specs: &[NativeSpec]) {
+    for spec in specs {
         rt.register_native(Rc::new(Builtin::new(
             spec.name,
             spec.arity,
             spec.func.clone(),
         )));
     }
+}
+
+/// 把全部内建（`core` + `ext`）注册到运行实例。
+///
+/// 解释器启动时调用一次；之后凡代码的 `定义 本地(...)` 仅在这张已注册的
+/// 原生函数表里查表，查不到则静默回退执行凡函数体。
+pub fn register_natives(rt: &mut Runtime) {
+    register_specs(rt, &core::specs());
+    register_specs(rt, &ext::ext_specs());
 }
 
 /// 列出 `core` 组全部内建的名字。
@@ -55,7 +62,11 @@ pub fn core_names() -> Vec<&'static str> {
 
 /// 按分组列出内建名字，供诊断与文档生成使用。
 pub fn specs_by_group() -> Vec<(NativeSpec, &'static str)> {
-    core::specs().into_iter().map(|s| (s, "core")).collect()
+    core::specs()
+        .into_iter()
+        .map(|s| (s, "core"))
+        .chain(ext::ext_specs().into_iter().map(|s| (s, "ext")))
+        .collect()
 }
 
 #[cfg(test)]
@@ -72,21 +83,35 @@ mod tests {
     }
 
     #[test]
-    fn 注册后可按名字查到() {
-        let rt = Runtime::new();
-        let mut rt = rt;
-        register_core(&mut rt);
+    fn 注册后core与ext内建都可按名字查到() {
+        let mut rt = Runtime::new();
+        register_natives(&mut rt);
+        // core 裸名
         for name in core_names() {
-            assert!(rt.lookup_native(name).is_some(), "内建 {} 未注册", name);
+            assert!(
+                rt.lookup_native(name).is_some(),
+                "core 内建 {} 未注册",
+                name
+            );
+        }
+        // ext 模块前缀名
+        for name in [
+            "regexMatch",
+            "jsonEncode",
+            "jsonDecode",
+            "httpRequest",
+            "tagRegisterHandler",
+        ] {
+            assert!(rt.lookup_native(name).is_some(), "ext 内建 {} 未注册", name);
         }
     }
 
     #[test]
-    fn 未注册的扩展内建查不到() {
-        // ext 组默认不加载，验证解释器本体确实零扩展依赖
-        let mut rt = Runtime::new();
-        register_core(&mut rt);
-        assert!(rt.lookup_native("regexMatch").is_none());
-        assert!(rt.lookup_native("jsonDecode").is_none());
+    fn 全部内建名字互不重复() {
+        let mut names: Vec<&str> = specs_by_group().iter().map(|(s, _)| s.name).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "core 与 ext 之间存在重名内建");
     }
 }

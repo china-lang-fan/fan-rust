@@ -7,7 +7,6 @@ use crate::error::{value, EvalResult, FanError};
 use crate::eval::Interpreter;
 use fan_ast::Visibility;
 use fan_ast::{ImportStmt, Position, ThroughExpr, VisibilityStmt};
-use fan_native::ExtRegistry;
 use fan_object::{Environment, ModuleValue, Object, Runtime};
 use fan_parser::parse_program;
 use std::cell::RefCell;
@@ -93,7 +92,6 @@ impl Loader {
     pub fn load(
         self_rc: &Rc<RefCell<Loader>>,
         rt: Rc<RefCell<Runtime>>,
-        ext: Rc<RefCell<ExtRegistry>>,
         base: &str,
         path: &str,
         pos: Position,
@@ -109,7 +107,7 @@ impl Loader {
             return Err(FanError::at(format!("检测到循环导入：{}", path), pos));
         }
         self_rc.borrow_mut().loading.push(full.clone());
-        let result = Self::load_uncached(self_rc, rt, ext, &full, path, pos);
+        let result = Self::load_uncached(self_rc, rt, &full, path, pos);
         self_rc.borrow_mut().loading.pop();
         let module = result?;
         self_rc.borrow_mut().cache.insert(full, module.clone());
@@ -119,7 +117,6 @@ impl Loader {
     fn load_uncached(
         self_rc: &Rc<RefCell<Loader>>,
         rt: Rc<RefCell<Runtime>>,
-        ext: Rc<RefCell<ExtRegistry>>,
         full: &str,
         path: &str,
         pos: Position,
@@ -140,8 +137,7 @@ impl Loader {
         let module_name = module_name_from_path(full);
 
         // 子模块与主程序共享运行实例，因此能直接使用内建函数与类型注册表。
-        let mut sub =
-            Interpreter::for_module(rt, self_rc.clone(), &base_dir, full, &module_name, ext);
+        let mut sub = Interpreter::for_module(rt, self_rc.clone(), &base_dir, full, &module_name);
         sub.run(&program)?;
 
         let module = Rc::new(RefCell::new(ModuleValue::new(module_name)));
@@ -259,8 +255,7 @@ impl Interpreter {
         };
         // 借用分离：取出 loader 句柄后释放，避免与 load 期间的借用冲突。
         let loader = self.loader.clone();
-        let ext = self.ext.clone();
-        let module = Loader::load(&loader, rt, ext, &base, &stmt.path, stmt.pos)?;
+        let module = Loader::load(&loader, rt, &base, &stmt.path, stmt.pos)?;
 
         if self.env.borrow().get(&stmt.name).is_some() {
             return Err(FanError::at(

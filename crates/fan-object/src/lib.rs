@@ -40,9 +40,7 @@ pub use environment::{
 pub use interface::{interface_missing_method, interface_sig_conflict};
 pub use kind::{kind_display_name, primitive_kind_from_name, runtime_type_name, Kind};
 pub use object::{Named, Object};
-pub use runtime::{
-    is_builtin_type_name, kind_type_name, FnFrame, Output, Runtime, FAN_EXT_ABI_VERSION,
-};
+pub use runtime::{is_builtin_type_name, kind_type_name, FnFrame, Output, Runtime};
 pub use runtime_entity::{
     Builtin, Class, Function, Instance, Interface, NamedType, NativeGroup, NativeImpl, NativeSpec,
 };

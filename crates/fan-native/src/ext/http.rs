@@ -1,36 +1,20 @@
-//! 凡语言**网络扩展库**：基于 `ureq`，以动态库形式按需加载。
+//! 网络内建：基于 `ureq`，随解释器静态编入，支持 HTTPS/TLS 与重定向。
 //!
-//! 这是 core/ext 分工中 `ext` 侧的实现。凡代码用到 `httpRequest`（见
-//! `fan-sdk/网络.凡`）时才会 `dlopen` 本库；找不到本库时回落到内置默认实现。
-//!
-//! # 与回落实现的差别
-//!
-//! 回落实现用标准库 `TcpStream` 手写 HTTP，**只支持明文 HTTP**。本库补齐
-//! HTTPS/TLS 与重定向等能力——这正是把它放进扩展库的理由：TLS 依赖链不该
-//! 进入解释器本体。
-//!
-//! # 与回落实现的契约
-//!
-//! 扩展库加载后会**替换**回落实现，故对外行为必须与之一致：
+//! 对外契约（见 `fan-sdk/网络.凡`）：
 //!
 //! - `httpRequest(方法, 地址, 选项?)` → `(结果字典, 错误值)`
 //! - 结果字典含 `success`、`statusCode`、`body`、`headers`
 //! - 失败时**同时**给出错误值与 `success: 假` 的字典，便于凡语言层
 //!   用 `如果 !结果["success"]` 判断
 //!
-//! 选项键沿用回落实现：`timeout`（秒）、`body`（字符串）、`headers`（字典）。
-//!
-//! # 导出符号
-//!
-//! - `fan_ext_abi_version() -> u32`
-//! - `fan_ext_register(rt: *mut Runtime)`
+//! 选项键：`timeout`（秒）、`body`（字符串）、`headers`（字典）。
 
-use fan_object::{ErrorValue, FanDict, NativeSpec, Object, Runtime};
+use fan_object::{ErrorValue, FanDict, NativeSpec, Object};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-/// 本库提供的模块名。
+/// 本模块提供的模块名。
 pub const MODULE: &str = "网络";
 
 /// 从选项字典取值。
@@ -80,8 +64,7 @@ pub fn request(method: &str, url: &str, options: Option<&FanDict>) -> Result<Fan
             // 那样 Content-Type 之类的头值就不对了
             let text = value.as_str().unwrap_or_else(|| value.inspect());
             // 头名与头值须是合法 HTTP 标记，不合法的**跳过**而非让整个请求
-            // 失败——回落实现是照发，这里退一步更接近它的「尽力而为」，
-            // 也避免用户因一个头名写错就发不出请求
+            // 失败，避免用户因一个头名写错就发不出请求
             let Ok(name) = ureq::http::HeaderName::try_from(name) else {
                 continue;
             };
@@ -143,7 +126,7 @@ fn failure_of(message: String) -> Vec<Object> {
     ]
 }
 
-/// 本库提供的内建。
+/// 本模块提供的内建。
 pub fn specs() -> Vec<NativeSpec> {
     vec![NativeSpec::ext(
         "httpRequest",
@@ -164,25 +147,10 @@ pub fn specs() -> Vec<NativeSpec> {
     )]
 }
 
-#[no_mangle]
-pub extern "C" fn fan_ext_abi_version() -> u32 {
-    fan_object::FAN_EXT_ABI_VERSION
-}
-
-/// 向运行实例注册本库的全部内建。
-///
-/// # Safety
-///
-/// `rt` 必须是解释器传入的有效 `Runtime` 指针；由加载方保证。
-#[no_mangle]
-pub unsafe extern "C" fn fan_ext_register(rt: *mut Runtime) {
-    let rt = &mut *rt;
-    rt.register_specs(&specs());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fan_object::Runtime;
     use std::io::{Read, Write};
 
     fn call(name: &str, args: Vec<Object>) -> Result<Vec<Object>, String> {
@@ -300,22 +268,10 @@ mod tests {
     }
 
     #[test]
-    fn 内建名与模块名符合加载约定() {
+    fn 内建名与模块名符合约定() {
         for spec in specs() {
             assert_eq!(spec.ext_module, Some(MODULE));
             assert_eq!(spec.name, "httpRequest");
         }
-    }
-
-    #[test]
-    fn 导出的abi版本与解释器一致() {
-        assert_eq!(fan_ext_abi_version(), fan_object::FAN_EXT_ABI_VERSION);
-    }
-
-    #[test]
-    fn 通过c接口注册可用() {
-        let mut rt = Runtime::new();
-        unsafe { fan_ext_register(&mut rt as *mut Runtime) };
-        assert!(rt.lookup_native("httpRequest").is_some());
     }
 }

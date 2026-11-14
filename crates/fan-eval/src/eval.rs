@@ -22,11 +22,6 @@ pub struct Interpreter {
     pub loader: Rc<RefCell<crate::module::Loader>>,
     /// 标签处理器注册表。
     pub tags: crate::tag::TagRegistry,
-    /// 扩展动态库登记表：仅在 `定义 本地("模块.函数")` 引用了该模块的原生函数时才加载。
-    ///
-    /// 与主程序、各子模块共享同一份：动态库一旦加载就无法卸载，登记表是
-    /// 进程级状态，若各自持有会导致同一库被重复登记。
-    pub ext: Rc<RefCell<fan_native::ExtRegistry>>,
     /// 循环嵌套深度，用于校验 `跳出`/`继续` 的合法性。
     loop_depth: usize,
     /// 函数嵌套深度，用于校验 `返回` 的合法性。
@@ -73,8 +68,7 @@ impl Interpreter {
     pub fn new() -> Self {
         let env = Rc::new(RefCell::new(Environment::new()));
         let loader = Rc::new(RefCell::new(crate::module::Loader::new(Vec::new())));
-        let ext = Rc::new(RefCell::new(fan_native::ExtRegistry::new()));
-        let interp = Interpreter::with_parts(env, loader, ext);
+        let interp = Interpreter::with_parts(env, loader);
         interp.register_core_natives();
         interp
     }
@@ -84,8 +78,7 @@ impl Interpreter {
         let rt = Rc::new(RefCell::new(Runtime::with_output(sink)));
         let env = Rc::new(RefCell::new(Environment::for_runtime(rt)));
         let loader = Rc::new(RefCell::new(crate::module::Loader::new(Vec::new())));
-        let ext = Rc::new(RefCell::new(fan_native::ExtRegistry::new()));
-        let interp = Interpreter::with_parts(env, loader, ext);
+        let interp = Interpreter::with_parts(env, loader);
         interp.register_core_natives();
         interp
     }
@@ -99,20 +92,18 @@ impl Interpreter {
         env: Rc<RefCell<Environment>>,
         loader: Rc<RefCell<crate::module::Loader>>,
     ) -> Self {
-        Interpreter::with_parts(env, loader, self.ext.clone())
+        Interpreter::with_parts(env, loader)
     }
 
-    /// 全部构造路径的唯一出口：集中装配标签注册表与扩展登记表。
+    /// 全部构造路径的唯一出口：集中装配标签注册表。
     fn with_parts(
         env: Rc<RefCell<Environment>>,
         loader: Rc<RefCell<crate::module::Loader>>,
-        ext: Rc<RefCell<fan_native::ExtRegistry>>,
     ) -> Self {
         Interpreter {
             env,
             loader,
             tags: crate::tag::TagRegistry::with_builtins(),
-            ext,
             loop_depth: 0,
             fn_depth: 0,
             defers: Vec::new(),
@@ -139,8 +130,7 @@ impl Interpreter {
             e.source_file = source_file.to_string();
         }
         let loader = Rc::new(RefCell::new(crate::module::Loader::new(modules_dirs)));
-        let ext = Rc::new(RefCell::new(fan_native::ExtRegistry::new()));
-        let interp = Interpreter::with_parts(env, loader, ext);
+        let interp = Interpreter::with_parts(env, loader);
         interp.register_core_natives();
         interp
     }
@@ -155,7 +145,6 @@ impl Interpreter {
         base_dir: &str,
         source_file: &str,
         module_name: &str,
-        ext: Rc<RefCell<fan_native::ExtRegistry>>,
     ) -> Self {
         let env = Rc::new(RefCell::new(Environment::for_runtime(rt)));
         {
@@ -165,19 +154,19 @@ impl Interpreter {
             e.module_name = module_name.to_string();
             e.module_export = true;
         }
-        let interp = Interpreter::with_parts(env, loader, ext);
+        let interp = Interpreter::with_parts(env, loader);
         interp.register_core_natives();
         interp
     }
 
-    /// 注册 `core` 组内建（纯标准库实现），并补上 `打印`/`打印行`。
+    /// 注册全部内建（core + ext），并补上 `打印`/`打印行`。
     ///
     /// `打印`/`打印行` 是语言内置输出能力，无需导入模块即可调用；标准库
     /// `系统.凡` 的 `打印` 则通过 `定义 本地("print") 函数 ...` 绑定到同一份实现。
     fn register_core_natives(&self) {
         let rt = self.env.borrow().runtime();
         let mut rt = rt.borrow_mut();
-        fan_native::register_core(&mut rt);
+        fan_native::register_natives(&mut rt);
         // 复用 core 的 print，避免同一能力出现两份实现
         let print = rt.lookup_native("print").expect("core 组应提供 print");
         rt.register_native(Rc::new(Builtin::new("打印", None, print.func.clone())));
@@ -1244,26 +1233,10 @@ impl Interpreter {
 
     /// 按 `定义 本地("模块.函数")` 声明解析原生实现。
     ///
-    /// 与旧 `@内建` 标签的关键差异是**静默回退**：以下三种「找不到」都返回
-    /// `None` 而非报错，由调用方回退执行函数体：
-    ///
-    /// 1. 无模块前缀且名字不在已注册的 core 内建里；
-    /// 2. 扩展模块的动态库加载失败（`ensure` 已内置默认实现回落，仍失败）；
-    /// 3. 模块加载成功但其中没有该函数名。
+    /// 全部内建（core 与 ext）已在解释器启动时注册进同一张原生函数表，这里
+    /// 只按函数名查表。查不到则返回 `None`，由调用方静默回退执行函数体——
+    /// native 名拼错不产生运行时信号，静态诊断由 `fan-analysis` 负责。
     fn bind_native(&mut self, decl: &ast::NativeDecl) -> Option<Rc<Builtin>> {
-        if let Some(module) = &decl.module {
-            let rt = self.env.borrow().runtime();
-            let loaded = {
-                let mut rt_mut = rt.borrow_mut();
-                self.ext.borrow_mut().ensure(&mut rt_mut, module)
-            };
-            // 库加载失败：静默回退函数体，不产生运行时信号。
-            if loaded.is_err() {
-                return None;
-            }
-        }
-        // 无模块前缀：只查 core 已注册内建；有模块前缀：ensure 后再查。
-        // 查无此名同样静默回退。
         self.env
             .borrow()
             .runtime()

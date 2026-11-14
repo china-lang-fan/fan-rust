@@ -6,15 +6,12 @@ license.workspace = true
 authors.workspace = true
 description = "凡语言原生函数库"
 
-# 注意：本 crate 只依赖标准库。依赖第三方库的内建（正则/JSON/HTTP）位于
-# 独立的扩展动态库 crate 中，由 `@内建模块` 标签按需加载，见 `src/ext/`。
+# core 组只依赖标准库；ext 组（正则/JSON/HTTP）依赖成熟第三方 crate，
+# 全部随解释器静态编入，启动时统一注册，无动态库与 FFI 边界，见 `src/ext/`。
 [dependencies]
 fan-ast = { workspace = true }
 fan-object = { workspace = true }
-
-# 仅测试期依赖：让 `cargo test -p fan-native` 先产出扩展动态库，
-# 端到端用例才能 dlopen 到它。运行期解释器并不依赖扩展库。
-[dev-dependencies]
-fan-ext-regex = { workspace = true }
-fan-ext-json = { workspace = true }
-fan-ext-http = { workspace = true }
+regex = "1"
+# preserve_order：保持对象键的写入顺序，与凡语言字典语义一致
+serde_json = { version = "1", features = ["preserve_order"] }
+ureq = "3"

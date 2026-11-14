@@ -101,39 +101,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fan-ext-http"
-version = "0.6.1"
-dependencies = [
- "fan-object",
- "ureq",
-]
-
-[[package]]
-name = "fan-ext-json"
-version = "0.6.1"
-dependencies = [
- "fan-ast",
- "fan-object",
- "serde_json",
-]
-
-[[package]]
-name = "fan-ext-regex"
-version = "0.6.1"
-dependencies = [
- "fan-object",
- "regex",
-]
-
-[[package]]
-name = "fan-ext-tag"
-version = "0.6.1"
-dependencies = [
- "fan-ast",
- "fan-object",
-]
-
-[[package]]
 name = "fan-lexer"
 version = "0.6.1"
 dependencies = [
@@ -155,10 +122,10 @@ name = "fan-native"
 version = "0.6.1"
 dependencies = [
  "fan-ast",
- "fan-ext-http",
- "fan-ext-json",
- "fan-ext-regex",
  "fan-object",
+ "regex",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

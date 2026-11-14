@@ -5,7 +5,7 @@
 //! 新增 Rust 侧标签只需实现 `TagHandler` 并注册，无需改动求值器。
 //!
 //! 此外，凡语言代码可用 `注册标签处理(标签名, 处理函数)`（见 `fan-sdk/库/标签工具.凡`，
-//! 经 fan-ext-tag 或内置回落注册到 `Runtime::fan_tag_handlers`）登记一个**凡语言处理器**。
+//! 由静态编入的原生内建 `tagRegisterHandler` 写入 `Runtime::fan_tag_handlers`）登记一个**凡语言处理器**。
 //! 函数声明期遇到带处理器的标签时，求值器构造标签上下文并回调该凡函数，
 //! 处理器可通过 `上下文.替换实现(新实现)` 改写目标函数。对应 Go 版
 //! `evaluator/tag.go` 的 `processTags`/`registerFanTagHandler`。

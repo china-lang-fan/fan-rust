@@ -419,14 +419,15 @@ pub type NativeImpl = Rc<dyn Fn(&mut crate::Runtime, Vec<Object>) -> Result<Vec<
 
 /// 内建函数分组。
 ///
-/// 解释器只内置 `Core` 组；`Ext` 组位于独立动态库，由 `定义 本地("模块名.函数名") 函数 ...`
-/// 按需加载，因此不使用扩展能力的程序无需加载任何第三方依赖。
+/// 两组都在解释器启动时静态注册，差别只在依赖来源：`Core` 仅用 Rust 标准库，
+/// `Ext` 依赖第三方 crate（正则/JSON/HTTP）。凡代码以
+/// `定义 本地("名字")`（core 裸名）或 `定义 本地("模块名.函数名")`（ext 前缀）绑定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NativeGroup {
     /// 仅依赖 Rust 标准库，编译进解释器本体。
     #[default]
     Core,
-    /// 依赖第三方库，交付为独立动态库。
+    /// 依赖第三方库，同样静态编入解释器。
     Ext,
 }
 
@@ -448,9 +449,9 @@ pub struct NativeSpec {
     pub name: &'static str,
     /// 最少参数个数；`None` 表示不校验。
     pub arity: Option<usize>,
-    /// 所属分组，决定交付与加载方式。
+    /// 所属分组，标记依赖来源（core 仅标准库 / ext 含第三方 crate）。
     pub group: NativeGroup,
-    /// 所属动态库模块名（`Ext` 组有效）。
+    /// 所属模块名（`Ext` 组有效），用于静态诊断与来源标记。
     pub ext_module: Option<&'static str>,
     /// 实现体。
     pub func: NativeImpl,
@@ -468,7 +469,7 @@ impl NativeSpec {
         }
     }
 
-    /// 声明一个位于动态库中的内建。
+    /// 声明一个依赖第三方库的 ext 内建。
     pub fn ext(
         name: &'static str,
         arity: Option<usize>,

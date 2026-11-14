@@ -1,57 +1,39 @@
 //! `定义 本地("模块.函数")` 的静态诊断。
 //!
 //! 运行时语义是「native 优先、找不到则静默回退函数体」，因此 native 名拼错
-//! 不会产生任何运行时信号。这里在**不加载扩展动态库**的前提下，静态读取
-//! fan-native 的 core/ext 默认实现名单，对三类「找不到」给出 Warning 级提示，
+//! 不会产生任何运行时信号。这里在**不执行程序**的前提下，静态读取 fan-native
+//! 编译期注册的 core/ext 内建名单，对三类「找不到」给出 Warning 级提示，
 //! 不阻断运行（回退仍会发生）：
 //!
 //! 1. 无模块前缀且名字不在 core 内建里；
-//! 2. 模块名没有任何扩展实现（既无动态库也无默认实现）；
+//! 2. 模块名没有任何 ext 实现；
 //! 3. 模块存在但其中没有该函数名。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use fan_ast::expr::Expr;
 use fan_ast::stmt::Stmt;
 use fan_ast::{NativeDecl, Program};
-use fan_native::ext::default;
+use fan_native::ext;
 
 use crate::diagnostic::{Diagnostic, Severity};
 
 /// 静态 native 目录：core 名集合 + 各扩展模块的函数名集合。
 ///
-/// 全部来自编译期内建描述符，构造过程不触碰文件系统、不 dlopen。
+/// 全部来自编译期内建描述符，构造过程不触碰文件系统、不执行代码。
 #[derive(Debug, Default)]
 struct NativeCatalog {
     /// core 组内建名（无模块前缀时查这里）。
     core: HashSet<&'static str>,
-    /// 已知扩展模块（小写别名归一）→ 该模块默认实现提供的函数名。
-    ext_modules: std::collections::HashMap<String, HashSet<&'static str>>,
+    /// 归一模块名 → 该模块提供的函数名。
+    ext_modules: HashMap<String, HashSet<&'static str>>,
 }
 
 impl NativeCatalog {
     fn build() -> Self {
-        let mut catalog = NativeCatalog::default();
-        for spec in fan_native::core::specs() {
-            catalog.core.insert(spec.name);
-        }
-        for (alias, specs) in [
-            ("json", default::json::specs()),
-            ("regex", default::regex::specs()),
-            ("http", default::http::specs()),
-        ] {
-            let names = specs.iter().map(|s| s.name).collect();
-            catalog.ext_modules.insert(alias.to_string(), names);
-        }
-        catalog
-    }
-
-    /// 把源码里的模块名归一到目录键（小写；中文别名映射到 ASCII 库名）。
-    fn normalize_module(module: &str) -> String {
-        match module.to_lowercase().as_str() {
-            "正则" => "regex".to_string(),
-            "网络" => "http".to_string(),
-            other => other.to_string(),
+        NativeCatalog {
+            core: fan_native::core::specs().iter().map(|s| s.name).collect(),
+            ext_modules: ext::ext_catalog(),
         }
     }
 
@@ -74,19 +56,12 @@ impl NativeCatalog {
             }
             // 带模块前缀：先看模块是否存在，再看模块里有没有该函数。
             Some(module) => {
-                let key = Self::normalize_module(module);
+                let key = ext::normalize_module(module);
                 match self.ext_modules.get(&key) {
-                    None => {
-                        if default::has_default(module) {
-                            // 别名已归一却仍走到这里，属于目录登记遗漏：不报为妙。
-                            None
-                        } else {
-                            Some(warn(format!(
-                                "本地绑定模块 {} 没有扩展实现，运行时将回退执行函数体",
-                                module
-                            )))
-                        }
-                    }
+                    None => Some(warn(format!(
+                        "本地绑定模块 {} 没有 ext 实现，运行时将回退执行函数体",
+                        module
+                    ))),
                     Some(names) => {
                         if names.contains(decl.name.as_str()) {
                             None
@@ -163,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn 扩展模块命中默认实现无诊断() {
+    fn 扩展模块命中静态注册无诊断() {
         let src = "定义 本地(\"json.jsonEncode\") 函数 生成(任意 值)\n    返回 空\n结束\n";
         assert!(warnings(src).is_empty());
     }
@@ -188,7 +163,7 @@ mod tests {
         let src = "定义 本地(\"不存在的模块.某某\") 函数 甲()\n    返回 空\n结束\n";
         let diags = warnings(src);
         assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("没有扩展实现"));
+        assert!(diags[0].message.contains("没有 ext 实现"));
     }
 
     #[test]

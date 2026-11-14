@@ -46,7 +46,7 @@ mod tests {
                 "{} 分组错误",
                 spec.name
             );
-            assert!(spec.ext_module.is_none(), "{} 不应属于动态库", spec.name);
+            assert!(spec.ext_module.is_none(), "{} 不应属于 ext 模块", spec.name);
         }
     }
 

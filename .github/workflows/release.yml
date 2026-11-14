@@ -110,7 +110,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: 构建 release
-        run: cargo build --release --target ${{ matrix.target }} -p fan-cli -p fan-ext-json -p fan-ext-regex -p fan-ext-http -p fan-ext-tag
+        run: cargo build --release --target ${{ matrix.target }} -p fan-cli
 
       # 标准库只带 .凡 与说明文件，不带 .git
       - name: 组装安装包
@@ -129,17 +129,8 @@ jobs:
           # 标准库已按 库/、测试/ 分目录组织，需整体保留目录结构复制
           cp -R fan-sdk/库 fan-sdk/测试 "$pkg/sdk/"
           cp fan-sdk/README.md fan-sdk/LICENSE "$pkg/sdk/"
-          # 扩展动态库：解释器按可执行文件所在目录查找，故与 fan 同级。
-          # 库名各平台不同：macOS 是 libfan_ext_X.dylib，Linux 是 .so，
-          # Windows 是 fan_ext_X.dll（无 lib 前缀）。这里不做「找不到就跳过」，
-          # 少一个库就让本步失败——否则包能跑，但会静默回落成能力受限的
-          # 默认实现，从外面完全看不出来。
-          case "${{ matrix.target }}" in
-            *windows*) lib_prefix=fan_ext_; lib_ext=dll ;;
-            *darwin*) lib_prefix=libfan_ext_; lib_ext=dylib ;;
-            *) lib_prefix=libfan_ext_; lib_ext=so ;;
-          esac
-          cp target/${{ matrix.target }}/release/${lib_prefix}*.${lib_ext} "$pkg/"
+          # 正则/JSON/HTTP/标签等 ext 能力已静态编入 fan 可执行文件，
+          # 不再分发任何动态库，发布包即「单可执行 + sdk」。
 
       - name: 打包（tar.gz）
         if: runner.os != 'Windows'

@@ -13,13 +13,6 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::rc::Rc;
 
-/// 扩展动态库的 ABI 版本。
-///
-/// 解释器与扩展库必须链接同一份 `fan-object`，否则 `Runtime` 的内存布局可能
-/// 不一致。扩展库导出 `fan_ext_abi_version` 供加载前校验，常量放在这里是为
-/// 了让两侧引用同一个定义，不会各自漂移。
-pub const FAN_EXT_ABI_VERSION: u32 = 1;
-
 /// 调用栈中的一帧（凡函数）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FnFrame {
@@ -59,7 +52,7 @@ pub struct Runtime {
     pub mixfix_functions: HashMap<String, HashMap<String, Rc<Function>>>,
     /// 凡语言标签处理器表：标签名 → 处理函数。
     ///
-    /// 由 `注册标签处理(标签名, 处理函数)`（经 fan-ext-tag 或内置回落注册）写入，
+    /// 由 `注册标签处理(标签名, 处理函数)`（经静态编入的原生内建 `tagRegisterHandler`）写入，
     /// 求值器在函数声明期按标签名查这里并回调处理函数。object 层只负责存储，
     /// 实际回调（需要解释器）由 fan-eval 完成。
     pub fan_tag_handlers: HashMap<String, Rc<Function>>,
@@ -176,7 +169,7 @@ impl Runtime {
         self.native_functions.insert(builtin.name.clone(), builtin);
     }
 
-    /// 按描述符登记内建。解释器与扩展库都走这里，保证登记方式一致。
+    /// 按描述符登记内建。core 与 ext 内建都走这里，保证登记方式一致。
     pub fn register_spec(&mut self, spec: &NativeSpec) {
         self.register_native(Rc::new(Builtin::new(
             spec.name,

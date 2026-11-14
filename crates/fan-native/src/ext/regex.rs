@@ -1,22 +1,13 @@
-//! 凡语言**正则扩展库**：基于 `regex` crate，以动态库形式按需加载。
+//! 正则内建：基于 `regex` crate，随解释器静态编入。
 //!
-//! 这是 core/ext 分工中 `ext` 侧的一个真实实现样例。解释器本体零第三方
-//! 依赖，只有凡代码引用了 `regex` 模块的原生函数（`定义 本地("regex.regexMatch") 函数 ...`
-//! 之类）时才会 `dlopen` 本库；找不到本库时，解释器回落到内置的纯标准库引擎。
-//!
-//! # 导出符号
-//!
-//! - `fan_ext_abi_version() -> u32`
-//! - `fan_ext_register(rt: *mut Runtime)`
-//!
-//! 两者必须与 `fan-native` 的加载约定一致，ABI 版本取自 `fan-object` 中的
-//! 公共常量，不会两侧漂移。
+//! 凡代码经 `定义 本地("regex.regexMatch") 函数 ...`（见 `fan-sdk/正则.凡`）
+//! 绑定本模块的内建。模块名常量保留中文 `正则`，与凡语言书写一致。
 
-use fan_object::{ErrorValue, NativeSpec, Object, Runtime};
+use fan_object::{ErrorValue, NativeSpec, Object};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// 本库提供的模块名。
+/// 本模块提供的模块名。
 pub const MODULE: &str = "正则";
 
 /// 把编译错误转成凡语言错误值。
@@ -205,26 +196,10 @@ pub fn specs() -> Vec<NativeSpec> {
     ]
 }
 
-/// ABI 版本，供解释器在加载前校验。
-#[no_mangle]
-pub extern "C" fn fan_ext_abi_version() -> u32 {
-    fan_object::FAN_EXT_ABI_VERSION
-}
-
-/// 向运行实例注册本库的全部内建。
-///
-/// # Safety
-///
-/// `rt` 必须是解释器传入的有效 `Runtime` 指针；由加载方保证。
-#[no_mangle]
-pub unsafe extern "C" fn fan_ext_register(rt: *mut Runtime) {
-    let rt = &mut *rt;
-    rt.register_specs(&specs());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fan_object::Runtime;
 
     fn call(name: &str, args: Vec<Object>) -> Result<Vec<Object>, String> {
         let spec = specs()
@@ -312,24 +287,10 @@ mod tests {
     }
 
     #[test]
-    fn 扩展库声明的模块名正确() {
+    fn 模块名与内建名正确() {
         for spec in specs() {
             assert_eq!(spec.ext_module, Some(MODULE));
             assert!(spec.name.starts_with("regex"));
-        }
-    }
-
-    #[test]
-    fn 导出的abi版本与解释器一致() {
-        assert_eq!(fan_ext_abi_version(), fan_object::FAN_EXT_ABI_VERSION);
-    }
-
-    #[test]
-    fn 通过c接口注册可用() {
-        let mut rt = Runtime::new();
-        unsafe { fan_ext_register(&mut rt as *mut Runtime) };
-        for name in ["regexMatch", "regexFind", "regexReplace", "regexQuote"] {
-            assert!(rt.lookup_native(name).is_some(), "内建 {} 未注册", name);
         }
     }
 }

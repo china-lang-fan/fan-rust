@@ -1,39 +1,21 @@
-//! 凡语言**JSON 扩展库**：基于 `serde_json`，以动态库形式按需加载。
+//! JSON 内建：基于 `serde_json`，随解释器静态编入。
 //!
-//! 这是 core/ext 分工中 `ext` 侧的实现。解释器本体零第三方依赖，只有凡代码
-//! 用到 `jsonEncode`/`jsonDecode`（见 `fan-sdk/编码.凡`）时才会 `dlopen` 本库；
-//! 找不到本库时，解释器回落到内置的纯标准库实现。
-//!
-//! # 与回落实现的契约
-//!
-//! 扩展库加载后会**替换**回落实现，故对外行为必须与之一致，否则切换实现
-//! 就会改变程序语义：
+//! 对外契约（见 `fan-sdk/编码.凡`）：
 //!
 //! - `jsonEncode(值)` → `(文本, 错误)`；失败时文本为空串
 //! - `jsonDecode(文本)` → `(值, 错误)`；失败时值为 空
 //! - 整数一律解码为 整数 而非浮点——`编码_测试.凡` 断言 `值["items"][1]` 等于 2
 //!
-//! 唯一有意的差异：非有限浮点（`NaN`/`±Inf`）在回落实现里会写出 `NaN` 这类
-//! 非法 JSON 文本，本库改为明确报错。
-//!
-//! # 导出符号
-//!
-//! - `fan_ext_abi_version() -> u32`
-//! - `fan_ext_register(rt: *mut Runtime)`
-//!
-//! 两者必须与 `fan-native` 的加载约定一致，ABI 版本取自 `fan-object` 中的
-//! 公共常量，不会两侧漂移。
+//! 浮点序列化统一走 `fan_ast::format_f64`，使 `1.0` 写出「1」而不是「1.0」；
+//! 非有限浮点（`NaN`/`±Inf`）无法构成合法 JSON，明确报错。
 
-use fan_object::{FanDict, NativeSpec, Object, Runtime};
+use fan_object::{FanDict, NativeSpec, Object};
 use std::rc::Rc;
 
-/// 本库提供的模块名。
+/// 本模块提供的模块名。
 pub const MODULE: &str = "json";
 
 /// 统一的返回形式：成功 `(值, 空)`，失败 `(空值, 错误文本)`。
-///
-/// 失败用**字符串**而非错误对象，是为了与回落实现逐字一致——切换实现
-/// 不应改变凡语言层可观测的行为。
 fn result_of(value: Result<Object, String>, empty: Object) -> Vec<Object> {
     match value {
         Ok(v) => vec![v, Object::Nil],
@@ -47,8 +29,8 @@ fn to_json(value: &Object) -> Result<serde_json::Value, String> {
         Object::Int(i) => serde_json::Value::from(*i),
         Object::Byte(b) => serde_json::Value::from(*b),
         Object::Float(f) => {
-            // 走与回落实现同一个格式化函数，再按 JSON 数字重新解析：
-            // 这样 1.0 写出「1」而不是「1.0」，切换实现不会改变程序输出
+            // 走统一的浮点格式化函数，再按 JSON 数字重新解析：
+            // 这样 1.0 写出「1」而不是「1.0」
             let text = fan_ast::format_f64(*f);
             match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(serde_json::Value::Number(n)) => serde_json::Value::Number(n),
@@ -125,7 +107,7 @@ pub fn decode(text: &str) -> Result<Object, String> {
     Ok(to_object(value))
 }
 
-/// 本库提供的内建。
+/// 本模块提供的内建。
 pub fn specs() -> Vec<NativeSpec> {
     vec![
         NativeSpec::ext(
@@ -151,25 +133,10 @@ pub fn specs() -> Vec<NativeSpec> {
     ]
 }
 
-#[no_mangle]
-pub extern "C" fn fan_ext_abi_version() -> u32 {
-    fan_object::FAN_EXT_ABI_VERSION
-}
-
-/// 向运行实例注册本库的全部内建。
-///
-/// # Safety
-///
-/// `rt` 必须是解释器传入的有效 `Runtime` 指针；由加载方保证。
-#[no_mangle]
-pub unsafe extern "C" fn fan_ext_register(rt: *mut Runtime) {
-    let rt = &mut *rt;
-    rt.register_specs(&specs());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fan_object::Runtime;
 
     fn call(name: &str, args: Vec<Object>) -> Result<Vec<Object>, String> {
         let spec = specs()
@@ -192,9 +159,8 @@ mod tests {
     }
 
     #[test]
-    fn 编码浮点与回落实现一致() {
-        // 回落实现用 format_f64：1.0 写作「1」而不是「1.0」。
-        // 部署本扩展库不应让程序输出发生变化，故逐字对齐
+    fn 编码浮点格式统一() {
+        // 统一走 format_f64：1.0 写作「1」而不是「1.0」。
         assert_eq!(encode(&Object::Float(1.0)).unwrap(), "1");
         assert_eq!(encode(&Object::Float(0.0)).unwrap(), "0");
         assert_eq!(encode(&Object::Float(2.5)).unwrap(), "2.5");
@@ -242,7 +208,6 @@ mod tests {
 
     #[test]
     fn 编码非有限浮点数报错() {
-        // 回落实现会写出非法的 NaN 文本，扩展库改为报错
         assert!(encode(&Object::Float(f64::NAN)).is_err());
         assert!(encode(&Object::Float(f64::INFINITY)).is_err());
     }
@@ -306,26 +271,12 @@ mod tests {
     }
 
     #[test]
-    fn 内建名与模块名符合加载约定() {
+    fn 内建名与模块名符合约定() {
         for spec in specs() {
             assert_eq!(spec.ext_module, Some(MODULE));
         }
         assert!(specs().iter().any(|s| s.name == "jsonEncode"));
         assert!(specs().iter().any(|s| s.name == "jsonDecode"));
-    }
-
-    #[test]
-    fn 导出的abi版本与解释器一致() {
-        assert_eq!(fan_ext_abi_version(), fan_object::FAN_EXT_ABI_VERSION);
-    }
-
-    #[test]
-    fn 通过c接口注册可用() {
-        let mut rt = Runtime::new();
-        unsafe { fan_ext_register(&mut rt as *mut Runtime) };
-        for name in ["jsonEncode", "jsonDecode"] {
-            assert!(rt.lookup_native(name).is_some(), "内建 {name} 未注册");
-        }
     }
 
     #[test]
