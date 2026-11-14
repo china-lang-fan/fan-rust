@@ -415,9 +415,34 @@ impl Parser {
                 return None;
             }
         }
-        self.skip_statement_end();
-        branch.body = self.parse_switch_body()?;
+        // `为/当/其他 … 则 …` 或 `… 时 …`：显式引导词后既允许同一行的单条
+        // 语句，也允许换行接多行块；不写引导词时维持原「换行缩进块」语法。
+        if self.cur.type_ == TokenType::CaseThen {
+            self.next();
+            branch.body = self.parse_switch_then_body()?;
+        } else {
+            self.skip_statement_end();
+            branch.body = self.parse_switch_body()?;
+        }
         Some(branch)
+    }
+
+    /// 解析 `则`/`时` 引导词后的分支体。
+    ///
+    /// 同一行直接跟单条语句（`为 200 则 打印("成功")`）；引导词后若紧跟换行，
+    /// 则按普通缩进块解析多条语句。两种形态都以下一分支头或 `结束` 终止。
+    fn parse_switch_then_body(&mut self) -> Option<ast::BlockStmt> {
+        if self.cur.type_ == TokenType::Newline || self.cur.type_ == TokenType::Eof {
+            return self.parse_switch_body();
+        }
+        let pos = self.cur_pos();
+        let stmt = self.parse_statement()?;
+        // 消费单行语句后的换行，使下一轮能直接读到分支头（为/当/其他）或 结束
+        self.skip_statement_end();
+        Some(ast::BlockStmt {
+            pos,
+            statements: vec![stmt],
+        })
     }
 
     fn parse_switch_body(&mut self) -> Option<ast::BlockStmt> {
@@ -3531,6 +3556,60 @@ mod tests {
     fn 判断无主题时值匹配分支报错() {
         let errs = parse_err("判断\n    为 1\n        打印(1)\n结束");
         assert!(errs.first_message().unwrap().contains("判断分支应使用 当"));
+    }
+
+    #[test]
+    fn 判断则引导单行分支体() {
+        let prog = parse_ok(
+            "判断 状态码\n    为 200 则 打印(\"成功\")\n    为 301、302 时 打印(\"重定向\")\n    其他 则 打印(\"其他\")\n结束",
+        );
+        match &prog.statements[0] {
+            Stmt::Switch(s) => {
+                assert_eq!(s.branches.len(), 3);
+                // 每个分支体都是单条语句
+                for branch in &s.branches {
+                    assert_eq!(
+                        branch.body.statements.len(),
+                        1,
+                        "则/时 单行体应只有一条语句"
+                    );
+                }
+                assert_eq!(s.branches[0].values.len(), 1);
+                assert_eq!(s.branches[1].values.len(), 2, "时 同样支持多值");
+                assert!(s.branches[2].default);
+            }
+            other => panic!("应为判断语句，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 判断则后换行接多行块() {
+        let prog = parse_ok(
+            "判断 甲\n    为 1 则\n        打印(\"一\")\n        打印(\"二\")\n    其他\n        打印(\"其他\")\n结束",
+        );
+        match &prog.statements[0] {
+            Stmt::Switch(s) => {
+                assert_eq!(
+                    s.branches[0].body.statements.len(),
+                    2,
+                    "则 后换行应支持多行块"
+                );
+            }
+            other => panic!("应为判断语句，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 判断当守卫支持则引导() {
+        let prog =
+            parse_ok("判断\n    当 甲 大于 5 则 打印(\"大\")\n    其他 则 打印(\"小\")\n结束");
+        match &prog.statements[0] {
+            Stmt::Switch(s) => {
+                assert!(s.branches[0].guard);
+                assert_eq!(s.branches[0].body.statements.len(), 1);
+            }
+            other => panic!("应为判断语句，实际 {other:?}"),
+        }
     }
 
     #[test]

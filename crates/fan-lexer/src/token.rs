@@ -98,6 +98,8 @@ pub enum TokenType {
     Switch,
     Case,
     Default,
+    /// `判断` 分支体引导词：`为 值 则 …` / `为 值 时 …`，与 `如果` 的 `那么` 区分。
+    CaseThen,
     Then,
     Else,
     ElseIf,
@@ -207,6 +209,7 @@ impl fmt::Display for TokenType {
             TokenType::Switch => "SWITCH",
             TokenType::Case => "CASE",
             TokenType::Default => "DEFAULT",
+            TokenType::CaseThen => "CASETHEN",
             TokenType::Then => "THEN",
             TokenType::Else => "ELSE",
             TokenType::ElseIf => "ELSEIF",
@@ -333,6 +336,8 @@ pub fn lookup_keyword(ident: &str) -> Option<TokenType> {
         "右移" => TokenType::Shr,
         "判断" => TokenType::Switch,
         "其他" => TokenType::Default,
+        "则" => TokenType::CaseThen,
+        "时" => TokenType::CaseThen,
         "如果" => TokenType::If,
         "那么" => TokenType::Then,
         "否则" => TokenType::Else,
@@ -423,6 +428,8 @@ pub fn all_keywords() -> Vec<&'static str> {
         "右移",
         "判断",
         "其他",
+        "则",
+        "时",
         "如果",
         "那么",
         "否则",
@@ -506,6 +513,15 @@ mod tests {
     }
 
     #[test]
+    fn 判断分支引导词则与时映射同一记号() {
+        assert_eq!(lookup_keyword("则"), Some(TokenType::CaseThen));
+        assert_eq!(lookup_keyword("时"), Some(TokenType::CaseThen));
+        // 与 如果 的引导词 那么 区分，避免两类语句串台
+        assert_eq!(lookup_keyword("那么"), Some(TokenType::Then));
+        assert_ne!(TokenType::CaseThen, TokenType::Then);
+    }
+
+    #[test]
     fn 注释不是关键字标识符() {
         // “注释”在语法方案中是注释起始标记，但不是保留关键字。
         assert_eq!(lookup_keyword("注释"), None);
@@ -586,6 +602,7 @@ mod tests {
             TokenType::Switch,
             TokenType::Case,
             TokenType::Default,
+            TokenType::CaseThen,
             TokenType::Then,
             TokenType::Else,
             TokenType::While,

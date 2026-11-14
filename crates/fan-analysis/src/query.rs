@@ -62,6 +62,8 @@ pub const COMPLETION_KEYWORDS: &[&str] = &[
     "继续",
     "判断",
     "其他",
+    "则",
+    "时",
     "模型",
     "接口",
     "类型",
