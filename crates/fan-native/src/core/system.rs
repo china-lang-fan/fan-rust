@@ -144,14 +144,15 @@ pub fn specs() -> Vec<NativeSpec> {
                 Ok(vec![Object::Error(Rc::new(std::cell::RefCell::new(value)))])
             }),
         ),
-        // 失败：直接以错误中断当前函数
+        // 失败：直接以错误中断当前函数；零参时使用 SDK 声明的默认消息
         NativeSpec::core(
             "fail",
             Some(1),
             Rc::new(|_rt, args| {
-                let message = match &args[0] {
-                    Object::Str(s) => s.to_string(),
-                    other => other.inspect(),
+                let message = match args.first() {
+                    Some(Object::Str(s)) => s.to_string(),
+                    Some(other) => other.inspect(),
+                    None => "断言失败".to_string(),
                 };
                 Err(message)
             }),
