@@ -25,6 +25,7 @@ pub mod builtin {
     pub const ERROR: &str = "错误";
     pub const BYTE: &str = "字节";
     pub const CHAR: &str = "字符";
+    pub const HANDLE: &str = "句柄";
 }
 
 impl DeclType {
@@ -73,6 +74,7 @@ impl DeclType {
                 | builtin::ERROR
                 | builtin::BYTE
                 | builtin::CHAR
+                | builtin::HANDLE
         )
     }
 }
@@ -140,6 +142,7 @@ mod tests {
             "错误",
             "字节",
             "字符",
+            "句柄",
         ] {
             assert!(DeclType::named(name).is_builtin(), "{name} 应为内置类型");
         }

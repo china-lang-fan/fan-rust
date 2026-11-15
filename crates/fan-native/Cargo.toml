@@ -15,3 +15,5 @@ regex = "1"
 # preserve_order：保持对象键的写入顺序，与凡语言字典语义一致
 serde_json = { version = "1", features = ["preserve_order"] }
 ureq = "3"
+# FFI：运行时加载外部 C 动态库（.so/.dll/.dylib），unsafe 集中在 ext/ffi.rs
+libloading = "0.8"

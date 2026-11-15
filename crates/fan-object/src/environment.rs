@@ -309,6 +309,7 @@ pub fn check_single_decl_type(
         "布尔" => Some(Kind::Bool),
         "数组" => Some(Kind::Array),
         "字典" => Some(Kind::Dict),
+        "句柄" => Some(Kind::Handle),
         _ => None,
     };
     if let Some(want_kind) = want {

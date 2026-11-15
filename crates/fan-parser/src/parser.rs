@@ -2394,7 +2394,10 @@ impl Parser {
                 self.next();
                 Some(ast::Expr::Ident(ast::Ident { pos, name }))
             }
-            TokenType::TypeError | TokenType::TypeByte | TokenType::TypeChar => {
+            TokenType::TypeError
+            | TokenType::TypeByte
+            | TokenType::TypeChar
+            | TokenType::TypeHandle => {
                 let name = self.cur.literal.clone();
                 self.next();
                 Some(ast::Expr::Ident(ast::Ident { pos, name }))
@@ -2958,6 +2961,7 @@ fn is_type_token(t: TokenType) -> bool {
             | TokenType::TypeError
             | TokenType::TypeByte
             | TokenType::TypeChar
+            | TokenType::TypeHandle
     )
 }
 
@@ -3023,6 +3027,7 @@ fn parse_decl_type(t: TokenType) -> DeclType {
         TokenType::TypeError => "错误",
         TokenType::TypeByte => "字节",
         TokenType::TypeChar => "字符",
+        TokenType::TypeHandle => "句柄",
         _ => return DeclType::any(),
     };
     DeclType::named(name)

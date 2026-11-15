@@ -1233,15 +1233,21 @@ impl Interpreter {
 
     /// 按 `定义 本地("模块.函数")` 声明解析原生实现。
     ///
-    /// 全部内建（core 与 ext）已在解释器启动时注册进同一张原生函数表，这里
-    /// 只按函数名查表。查不到则返回 `None`，由调用方静默回退执行函数体——
-    /// native 名拼错不产生运行时信号，静态诊断由 `fan-analysis` 负责。
+    /// 全部内建（core 与 ext）已在解释器启动时注册进同一张原生函数表。
+    /// 带模块前缀的绑定（如 `ffi.open`）优先按**完整名**查注册表，命中即返回，
+    /// 从而让不同模块可以安全地复用 `open` 这类短名而不互相覆盖；查不到再回退
+    /// 按 `.` 之后的段名查，兼容历史 ext 内建（`jsonEncode` 等自带前缀的全名）。
+    /// 仍查不到则返回 `None`，由调用方静默回退执行函数体——native 名拼错不
+    /// 产生运行时信号，静态诊断由 `fan-analysis` 负责。
     fn bind_native(&mut self, decl: &ast::NativeDecl) -> Option<Rc<Builtin>> {
-        self.env
-            .borrow()
-            .runtime()
-            .borrow()
-            .lookup_native(&decl.name)
+        let runtime = self.env.borrow().runtime();
+        let table = runtime.borrow();
+        if decl.module.is_some() {
+            if let Some(found) = table.lookup_native(&decl.spec) {
+                return Some(found);
+            }
+        }
+        table.lookup_native(&decl.name)
     }
 
     /// 求 `...值` 并摊平成元素列表：数组字面量与调用实参共用。

@@ -11,7 +11,9 @@
 //! | [`json`] | `serde_json` | `json*` |
 //! | [`http`] | `ureq`（含 TLS） | `http*` |
 //! | [`tag`] | 纯标准库 | `tag*` |
+//! | [`ffi`] | `libloading`（运行时加载外部 C 库） | `ffi.*` |
 
+pub mod ffi;
 pub mod http;
 pub mod json;
 pub mod regex;
@@ -27,6 +29,7 @@ pub fn ext_specs() -> Vec<NativeSpec> {
     all.extend(json::specs());
     all.extend(http::specs());
     all.extend(tag::specs());
+    all.extend(ffi::specs());
     all
 }
 
@@ -45,7 +48,9 @@ pub fn normalize_module(module: &str) -> String {
 /// 静态 native 目录：归一模块名 → 该模块提供的内建名集合。
 ///
 /// 全部来自编译期内建描述符，不触碰文件系统，供 `fan-analysis` 对
-/// `定义 本地("模块.函数")` 做「模块/函数是否存在」的静态诊断。
+/// `定义 本地("模块.函数")` 做「模块/函数是否存在」的静态诊断。诊断按绑定串
+/// `.` 之后的短名比较，因此这里收录短名：历史 ext 名本身不带点（`regexMatch`），
+/// 而 ffi 组以全名注册（`ffi.open`），统一取最后一个 `.` 之后的段。
 pub fn ext_catalog() -> HashMap<String, HashSet<&'static str>> {
     let mut catalog = HashMap::new();
     for (key, specs) in [
@@ -53,10 +58,14 @@ pub fn ext_catalog() -> HashMap<String, HashSet<&'static str>> {
         ("json", json::specs()),
         ("http", http::specs()),
         ("tag", tag::specs()),
+        ("ffi", ffi::specs()),
     ] {
         catalog.insert(
             key.to_string(),
-            specs.iter().map(|s| s.name).collect::<HashSet<_>>(),
+            specs
+                .iter()
+                .map(|s| s.name.rsplit('.').next().unwrap_or(s.name))
+                .collect::<HashSet<_>>(),
         );
     }
     catalog
@@ -83,12 +92,18 @@ mod tests {
     fn 内建名在模块内不重复() {
         let catalog = ext_catalog();
         let mut seen = HashSet::new();
-        for specs in [regex::specs(), json::specs(), http::specs(), tag::specs()] {
+        for specs in [
+            regex::specs(),
+            json::specs(),
+            http::specs(),
+            tag::specs(),
+            ffi::specs(),
+        ] {
             for spec in specs {
                 assert!(seen.insert(spec.name), "内建名 {} 重复", spec.name);
             }
         }
-        assert_eq!(catalog.len(), 4);
+        assert_eq!(catalog.len(), 5);
     }
 
     #[test]
@@ -107,5 +122,7 @@ mod tests {
         assert!(catalog["json"].contains("jsonEncode"));
         assert!(catalog["http"].contains("httpRequest"));
         assert!(catalog["tag"].contains("tagRegisterHandler"));
+        assert!(catalog["ffi"].contains("open"));
+        assert!(catalog["ffi"].contains("toCString"));
     }
 }

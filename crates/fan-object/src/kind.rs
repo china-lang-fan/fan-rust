@@ -42,6 +42,8 @@ pub enum Kind {
     Builtin,
     /// 标签处理上下文 `标签上下文`
     TagContext,
+    /// 不透明句柄 `句柄`，用于与底层动态库沟通
+    Handle,
 }
 
 impl fmt::Display for Kind {
@@ -64,6 +66,7 @@ impl fmt::Display for Kind {
             Kind::Instance => "实例",
             Kind::Builtin => "内建",
             Kind::TagContext => "标签上下文",
+            Kind::Handle => "句柄",
         };
         f.write_str(s)
     }
@@ -100,6 +103,7 @@ pub fn primitive_kind_from_name(name: &str) -> Option<&'static str> {
         "字符" => "char",
         "数组" => "array",
         "字典" => "dict",
+        "句柄" => "handle",
         _ => return None,
     })
 }
@@ -126,6 +130,7 @@ pub fn runtime_type_name(value: &crate::Object) -> &'static str {
         Object::Instance(_) => "instance",
         Object::Builtin(_) => "builtin",
         Object::TagContext(_) => "tag_context",
+        Object::Handle(_) => "handle",
     }
 }
 
@@ -140,6 +145,7 @@ pub fn kind_display_name(kind: &str) -> &'static str {
         "char" => "字符",
         "array" => "数组",
         "dict" => "字典",
+        "handle" => "句柄",
         _ => "未知",
     }
 }

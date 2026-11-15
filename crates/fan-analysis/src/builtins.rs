@@ -35,6 +35,7 @@ pub fn type_keywords() -> HashSet<&'static str> {
         "错误",
         "字节",
         "字符",
+        "句柄",
         "任意",
         "空",
     ]

@@ -53,6 +53,8 @@ pub enum Object {
     Builtin(Rc<Builtin>),
     /// 标签处理上下文（标签处理器回调时接收）。
     TagContext(Rc<TagContextValue>),
+    /// 不透明句柄（动态库/函数符号/原生内存），用于 FFI。
+    Handle(Rc<crate::HandleValue>),
 }
 
 impl Object {
@@ -77,6 +79,7 @@ impl Object {
             Object::Instance(_) => Kind::Instance,
             Object::Builtin(_) => Kind::Builtin,
             Object::TagContext(_) => Kind::TagContext,
+            Object::Handle(_) => Kind::Handle,
         }
     }
 
@@ -124,6 +127,7 @@ impl Object {
             }
             Object::Builtin(b) => format!("内建 {}", b.name),
             Object::TagContext(_) => "标签上下文".to_string(),
+            Object::Handle(h) => h.to_string(),
         }
     }
 
@@ -299,6 +303,7 @@ impl PartialEq for Object {
                 a.name == b.name && Rc::ptr_eq(&a.func, &b.func)
             }
             (Object::TagContext(a), Object::TagContext(b)) => Rc::ptr_eq(a, b),
+            (Object::Handle(a), Object::Handle(b)) => a.id() == b.id(),
             _ => false,
         }
     }
