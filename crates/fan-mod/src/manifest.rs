@@ -1,4 +1,4 @@
-//! 项目清单 `凡.toml` 与锁文件 `凡.lock` 的数据模型与读写。
+//! 项目清单 `fan.toml` 与锁文件 `fan.lock` 的数据模型与读写。
 //!
 //! 一期只支持 git 源：每个依赖以内联表声明仓库地址与版本引用（分支、tag 或
 //! commit）。锁文件把每个依赖固定到具体 commit，保证可复现安装。
@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// 项目清单文件名（位于项目根）。
-pub const MANIFEST_NAME: &str = "凡.toml";
+pub const MANIFEST_NAME: &str = "fan.toml";
 /// 锁文件名（位于项目根，由工具生成，应提交到版本库）。
-pub const LOCK_NAME: &str = "凡.lock";
+pub const LOCK_NAME: &str = "fan.lock";
 /// 项目内第三方依赖的物化目录名。
 pub const DEPS_DIR: &str = "依赖";
 
-/// `凡.toml` 的 `[项目]` 段。
+/// `fan.toml` 的 `[项目]` 段。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ProjectMeta {
     #[serde(default)]
@@ -58,7 +58,7 @@ pub struct LockedPackage {
     pub 提交: String,
 }
 
-/// 锁文件 `凡.lock`。
+/// 锁文件 `fan.lock`。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Lockfile {
     #[serde(default, rename = "包")]
@@ -136,7 +136,7 @@ impl Lockfile {
     }
 }
 
-/// 向上逐级查找含 `凡.toml` 的目录，作为项目根；找不到返回 `None`。
+/// 向上逐级查找含 `fan.toml` 的目录，作为项目根；找不到返回 `None`。
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     let mut current = if start.is_absolute() {
         start.to_path_buf()

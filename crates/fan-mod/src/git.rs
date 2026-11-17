@@ -167,7 +167,7 @@ mod tests {
         run_git(&source, &["config", "user.email", "t@fan"]).unwrap();
         run_git(&source, &["config", "user.name", "测试"]).unwrap();
         std::fs::write(
-            source.join("凡.toml"),
+            source.join("fan.toml"),
             "[项目]\n名称 = \"x\"\n版本 = \"0.1.0\"\n",
         )
         .unwrap();
@@ -180,7 +180,7 @@ mod tests {
         let resolved = cache.resolve_commit(&url, None).unwrap();
         assert_eq!(resolved, head);
         let work = cache.prepare_worktree(&url, &resolved).unwrap();
-        assert!(work.join("凡.toml").is_file());
+        assert!(work.join("fan.toml").is_file());
         // 幂等：再次准备应返回同一目录且不报错。
         let again = cache.prepare_worktree(&url, &resolved).unwrap();
         assert_eq!(work, again);

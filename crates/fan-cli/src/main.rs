@@ -310,6 +310,7 @@ fn run_mod(rest: &[String]) -> Result<(), String> {
             fan_mod::add(&cwd, name, repo, reference)?
         }
         "install" => fan_mod::install(&cwd)?,
+        "update" => fan_mod::update(&cwd)?,
         "remove" => {
             let name = params.first().ok_or("用法：fan 模块 remove <名称>")?;
             fan_mod::remove(&cwd, name)?
@@ -331,9 +332,10 @@ fn run_mod(rest: &[String]) -> Result<(), String> {
 
 fn mod_usage_text() -> String {
     "用法：\n\
-     \x20 fan 模块 init [名称]                 生成 凡.toml 清单\n\
+     \x20 fan 模块 init [名称]                 生成 fan.toml 清单\n\
      \x20 fan 模块 add <名称> <git仓库> [引用]  添加 git 依赖并安装\n\
-     \x20 fan 模块 install                     按清单与锁文件安装全部依赖\n\
+     \x20 fan 模块 install                     按清单与锁文件安装全部依赖（含传递依赖）\n\
+     \x20 fan 模块 update                      忽略锁文件，重新解析全部依赖到最新提交\n\
      \x20 fan 模块 remove <名称>               移除依赖\n\
      \x20 fan 模块 tidy                        检查依赖与导入是否一致"
         .to_string()

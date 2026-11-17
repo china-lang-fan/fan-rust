@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::git::GitCache;
+use crate::graph::{resolve, ResolveMode, ResolvedPackage};
 use crate::manifest::{find_project_root, GitDep, LockedPackage, Lockfile, Manifest, DEPS_DIR};
 
 /// 模块管理命令的执行结果，输出给 CLI 打印。
@@ -45,7 +46,7 @@ pub fn init(dir: &Path, name: Option<String>) -> Result<Report, String> {
     Ok(report)
 }
 
-/// `fan 模块 add <名称> <仓库> [引用]`：声明依赖、解析 commit、安装并更新锁。
+/// `fan 模块 add <名称> <仓库> [引用]`：声明依赖，再按完整依赖图安装并更新锁。
 pub fn add(
     dir: &Path,
     name: &str,
@@ -62,58 +63,30 @@ pub fn add(
     manifest.依赖.insert(name.to_string(), dep);
     manifest.save(&root)?;
 
-    let cache = GitCache::new()?;
-    install_one(&root, &cache, name, repo, reference.as_deref(), &mut report)?;
-
+    sync_install(&root, ResolveMode::Normal, &mut report)?;
     report.say(format!("已添加依赖 {name}"));
     Ok(report)
 }
 
-/// `fan 模块 install`：按清单与锁文件安装全部依赖。
+/// `fan 模块 install`：按清单与锁文件安装全部依赖（含传递依赖）。
 pub fn install(dir: &Path) -> Result<Report, String> {
     let root = require_project(dir)?;
     let mut report = Report::default();
-    let manifest = Manifest::load(&root)?;
-    let mut lock = Lockfile::load(&root)?;
-    let cache = GitCache::new()?;
-
-    for (name, dep) in manifest.all_deps() {
-        let reference = dep.引用.as_deref();
-        // 锁里已有同一引用的 commit 时直接复用，避免无谓的重新解析。
-        let commit = match lock.find(&name) {
-            Some(locked) if locked.仓库 == dep.仓库 && locked.引用 == dep.引用 => {
-                locked.提交.clone()
-            }
-            _ => {
-                let commit = cache.resolve_commit(&dep.仓库, reference)?;
-                lock.upsert(LockedPackage {
-                    名称: name.clone(),
-                    仓库: dep.仓库.clone(),
-                    引用: dep.引用.clone(),
-                    提交: commit.clone(),
-                });
-                commit
-            }
-        };
-        materialize(&root, &cache, &dep.仓库, &commit, &name, &mut report)?;
-    }
-
-    // 清理锁中已不在清单里的条目。
-    let names: Vec<String> = lock.packages.iter().map(|p| p.名称.clone()).collect();
-    for name in names {
-        if !manifest.all_deps().contains_key(&name) {
-            lock.remove(&name);
-            remove_link(&root, &name);
-        }
-    }
-    lock.save(&root)?;
-    if report.lines.is_empty() {
-        report.say("依赖已是最新".to_string());
-    }
+    sync_install(&root, ResolveMode::Normal, &mut report)?;
     Ok(report)
 }
 
-/// `fan 模块 remove <名称>`：从清单、锁与依赖目录移除。
+/// `fan 模块 update`：忽略锁文件，把所有依赖重新解析到最新 commit 并重新物化。
+pub fn update(dir: &Path) -> Result<Report, String> {
+    let root = require_project(dir)?;
+    let mut report = Report::default();
+    sync_install(&root, ResolveMode::ForceUpdate, &mut report)?;
+    report.say("依赖已更新到最新引用".to_string());
+    Ok(report)
+}
+
+/// `fan 模块 remove <名称>`：从清单移除，并按新的依赖图清理锁与物化目录
+/// （包含不再被其他包引用的传递依赖）。
 pub fn remove(dir: &Path, name: &str) -> Result<Report, String> {
     let root = require_project(dir)?;
     let mut report = Report::default();
@@ -122,23 +95,66 @@ pub fn remove(dir: &Path, name: &str) -> Result<Report, String> {
         return Err(format!("清单中没有依赖 {name}"));
     }
     manifest.save(&root)?;
-    let mut lock = Lockfile::load(&root)?;
-    lock.remove(name);
-    lock.save(&root)?;
-    remove_link(&root, name);
+    sync_install(&root, ResolveMode::Normal, &mut report)?;
     report.say(format!("已移除依赖 {name}"));
     Ok(report)
 }
 
-/// `fan 模块 tidy`：扫描源码导入，报告清单中未使用、以及导入了但未声明的依赖。
+/// 解析完整依赖图、物化所有包、按解析结果重写锁文件并清理多余的物化目录。
 ///
-/// 一期只做只读诊断，不自动改清单（删除依赖有破坏性），供使用者据报告手动调整。
+/// 这是 install/add/remove/update 的共同核心：单一事实来源是「根清单递归解析出
+/// 的依赖图」，锁文件仅用于普通模式下复用已固定的 commit，避免无谓的网络解析。
+fn sync_install(
+    root: &Path,
+    mode: ResolveMode,
+    report: &mut Report,
+) -> Result<Vec<ResolvedPackage>, String> {
+    let manifest = Manifest::load(root)?;
+    let lock = Lockfile::load(root)?;
+    let cache = GitCache::new()?;
+
+    let graph = resolve(&cache, &manifest.all_deps(), &lock, mode)?;
+
+    let mut next_lock = Lockfile::default();
+    for pkg in &graph {
+        materialize(root, &cache, pkg, report)?;
+        next_lock.upsert(LockedPackage {
+            名称: pkg.名称.clone(),
+            仓库: pkg.仓库.clone(),
+            引用: pkg.引用.clone(),
+            提交: pkg.提交.clone(),
+        });
+    }
+
+    // 清理不在新依赖图中的旧条目（含已无引用的传递依赖）。
+    let names: Vec<String> = lock.packages.iter().map(|p| p.名称.clone()).collect();
+    for name in names {
+        if !next_lock.packages.iter().any(|p| p.名称 == name) {
+            next_lock.remove(&name);
+            remove_link(root, &name);
+        }
+    }
+
+    next_lock.save(root)?;
+    if report.lines.is_empty() {
+        report.say("依赖已是最新".to_string());
+    }
+    Ok(graph)
+}
+
+/// `fan 模块 tidy`：扫描源码导入，报告直接依赖中未使用、以及导入了但既未声明
+/// 也非传递依赖的包。
+///
+/// 只读诊断，不自动改清单（删除依赖有破坏性）。传递依赖（仅出现在锁文件中）
+/// 被导入是合法的，不会误报。
 pub fn tidy(dir: &Path) -> Result<Report, String> {
     let root = require_project(dir)?;
     let mut report = Report::default();
     let manifest = Manifest::load(&root)?;
+    let lock = Lockfile::load(&root)?;
     let imported = scan_dependency_imports(&root, &manifest)?;
 
+    // 直接依赖才检查「未使用」；传递依赖由其他包引入，不要求项目直接导入。
     for name in manifest.all_deps().keys() {
         if !imported.contains(name) {
             report.say(format!(
@@ -146,8 +162,14 @@ pub fn tidy(dir: &Path) -> Result<Report, String> {
             ));
         }
     }
+    // 已安装集合 = 直接依赖 + 锁中的传递依赖。
+    let mut available: std::collections::BTreeSet<String> =
+        manifest.all_deps().keys().cloned().collect();
+    for pkg in &lock.packages {
+        available.insert(pkg.名称.clone());
+    }
     for name in &imported {
-        if !manifest.all_deps().contains_key(name) {
+        if !available.contains(name) {
             report.say(format!("已导入但未声明：{name}（可执行 fan 模块 add ...）"));
         }
     }
@@ -157,38 +179,20 @@ pub fn tidy(dir: &Path) -> Result<Report, String> {
     Ok(report)
 }
 
-/// 安装单个依赖：解析 commit、写锁、物化目录。
-fn install_one(
-    root: &Path,
-    cache: &GitCache,
-    name: &str,
-    repo: &str,
-    reference: Option<&str>,
-    report: &mut Report,
-) -> Result<(), String> {
-    let commit = cache.resolve_commit(repo, reference)?;
-    let mut lock = Lockfile::load(root)?;
-    lock.upsert(LockedPackage {
-        名称: name.to_string(),
-        仓库: repo.to_string(),
-        引用: reference.map(|s| s.to_string()),
-        提交: commit.clone(),
-    });
-    lock.save(root)?;
-    materialize(root, cache, repo, &commit, name, report)
-}
-
 /// 检出工作树并在项目 `依赖/` 下建立指向它的链接或副本。
+///
+/// 幂等：物化目录已指向同一工作树（软链场景）时不重复创建，避免无意义输出。
 fn materialize(
     root: &Path,
     cache: &GitCache,
-    repo: &str,
-    commit: &str,
-    name: &str,
+    pkg: &ResolvedPackage,
     report: &mut Report,
 ) -> Result<(), String> {
-    let worktree = cache.prepare_worktree(repo, commit)?;
-    let link = root.join(DEPS_DIR).join(name);
+    let worktree = cache.prepare_worktree(&pkg.仓库, &pkg.提交)?;
+    let link = root.join(DEPS_DIR).join(&pkg.名称);
+    if already_linked(&link, &worktree) {
+        return Ok(());
+    }
     if link.exists() || link.is_symlink() {
         std::fs::remove_dir_all(&link)
             .or_else(|_| std::fs::remove_file(&link))
@@ -198,8 +202,21 @@ fn materialize(
         std::fs::create_dir_all(parent).map_err(|e| format!("创建依赖目录失败：{e}"))?;
     }
     link_or_copy(&worktree, &link)?;
-    report.say(format!("已安装 {name} → {}", link.display()));
+    report.say(format!("已安装 {} → {}", pkg.名称, link.display()));
     Ok(())
+}
+
+/// 判断物化目录是否已指向目标工作树：unix 下比较软链目标，其他平台视为未链接。
+#[cfg(unix)]
+fn already_linked(link: &Path, worktree: &Path) -> bool {
+    std::fs::read_link(link)
+        .map(|target| target == worktree)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn already_linked(_link: &Path, _worktree: &Path) -> bool {
+    false
 }
 
 fn remove_link(root: &Path, name: &str) {
