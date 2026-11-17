@@ -54,6 +54,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         "交互" | "repl" => run_repl(BufReader::new(std::io::stdin()), std::io::stdout()),
         "lsp" => run_lsp(),
+        "模块" | "mod" => run_mod(&args[1..]),
         "版本" | "version" | "-v" | "--version" => {
             println!("凡语言 {}（命令名：fan）", VERSION);
             Ok(())
@@ -79,6 +80,7 @@ fn usage_text() -> String {
           \x20 fan 测试 [目录或文件]          执行 *_测试.凡 中的测试函数\n\
           \x20 fan 检查 [目录或文件]          静态检查（不运行），报告未定义名、坏导入等\n\
           \x20 fan 交互                      进入交互式求值（REPL）\n\
+          \x20 fan 模块 <动作> [参数]         管理 git 源依赖（init/add/install/remove/tidy）\n\
           \x20 fan lsp                       启动语言服务器（LSP/stdio）\n\
           \x20 fan 版本                      输出版本\n\
           \x20 fan 帮助                      输出本帮助\n\
@@ -281,6 +283,60 @@ fn run_repl<I: BufRead, O: Write>(input: I, mut output: O) -> Result<(), String>
         }
     }
     Ok(())
+}
+
+/// 模块管理子命令：`fan 模块 <动作> [参数]`（英文别名 `fan mod`）。
+///
+/// 委托 fan-mod crate，git 源依赖的声明、锁定与安装。动作：
+/// init/add/install/remove/tidy。
+fn run_mod(rest: &[String]) -> Result<(), String> {
+    let (action, params) = rest
+        .split_first()
+        .ok_or_else(|| format!("缺少模块管理动作\n\n{}", mod_usage_text()))?;
+    let cwd = std::env::current_dir().map_err(|e| format!("无法获取当前目录：{e}"))?;
+    let report = match action.as_str() {
+        "init" => {
+            let name = params.first().cloned();
+            fan_mod::init(&cwd, name)?
+        }
+        "add" => {
+            let (name, rest) = params
+                .split_first()
+                .ok_or("用法：fan 模块 add <名称> <git仓库> [引用]")?;
+            let repo = rest
+                .first()
+                .ok_or("用法：fan 模块 add <名称> <git仓库> [引用]")?;
+            let reference = rest.get(1).cloned();
+            fan_mod::add(&cwd, name, repo, reference)?
+        }
+        "install" => fan_mod::install(&cwd)?,
+        "remove" => {
+            let name = params.first().ok_or("用法：fan 模块 remove <名称>")?;
+            fan_mod::remove(&cwd, name)?
+        }
+        "tidy" => fan_mod::tidy(&cwd)?,
+        other => {
+            return Err(format!(
+                "未知模块管理动作：{}\n\n{}",
+                other,
+                mod_usage_text()
+            ))
+        }
+    };
+    for line in report.lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn mod_usage_text() -> String {
+    "用法：\n\
+     \x20 fan 模块 init [名称]                 生成 凡.toml 清单\n\
+     \x20 fan 模块 add <名称> <git仓库> [引用]  添加 git 依赖并安装\n\
+     \x20 fan 模块 install                     按清单与锁文件安装全部依赖\n\
+     \x20 fan 模块 remove <名称>               移除依赖\n\
+     \x20 fan 模块 tidy                        检查依赖与导入是否一致"
+        .to_string()
 }
 
 /// 启动 LSP 语言服务器：在标准输入/输出上按 JSON-RPC、`Content-Length`

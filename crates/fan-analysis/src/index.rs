@@ -174,6 +174,11 @@ fn module_search_dirs(base: &Path) -> Vec<PathBuf> {
         }
     };
     add(base.to_path_buf());
+    // 第三方依赖优先：上溯定位项目根的 `依赖/` 目录，把各包根加入搜索路径，
+    // 与运行时 Loader（fan-eval::module::dependency_dirs）保持一致。
+    for dep_root in dependency_dirs(base) {
+        add(dep_root);
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             add(exe_dir.to_path_buf());
@@ -192,6 +197,41 @@ fn canonical_path(path: &Path) -> String {
     std::path::absolute(path)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| path.to_string_lossy().to_string())
+}
+
+/// 上溯定位项目根的 `依赖/` 目录，返回其中各第三方包根（与 fan-eval 对称）。
+fn dependency_dirs(base: &Path) -> Vec<PathBuf> {
+    const DEPS_DIR: &str = "依赖";
+    let mut current = match std::path::absolute(base) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    if current.is_file() {
+        current = match current.parent() {
+            Some(p) => p.to_path_buf(),
+            None => return Vec::new(),
+        };
+    }
+    for _ in 0..8 {
+        let deps = current.join(DEPS_DIR);
+        if deps.is_dir() {
+            let mut roots = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&deps) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        roots.push(path);
+                    }
+                }
+            }
+            roots.sort();
+            return roots;
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    Vec::new()
 }
 
 #[cfg(test)]

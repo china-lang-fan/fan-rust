@@ -1,0 +1,15 @@
+[package]
+name = "fan-mod"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "凡语言模块管理工具：git 源依赖的声明、锁定与安装"
+
+[lib]
+name = "fan_mod"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }

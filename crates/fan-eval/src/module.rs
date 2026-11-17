@@ -168,6 +168,9 @@ pub fn default_modules_dirs(base: &str) -> Vec<String> {
     let mut dirs: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut candidates: Vec<String> = vec![base.to_string()];
+    // 第三方依赖优先：从脚本目录逐级上溯定位项目根的 `依赖/` 目录，把其中每个
+    // 包根加入搜索路径，使 `导入 "依赖/<包>/库/xxx"` 与包内根相对导入可被解析。
+    candidates.extend(dependency_dirs(base));
     if let Ok(env) = std::env::var("FAN_SDK") {
         candidates.push(env);
     }
@@ -223,6 +226,46 @@ fn ancestors_with_sdk(start: &str) -> Vec<String> {
         }
     }
     found
+}
+
+/// 项目第三方依赖的搜索目录。
+///
+/// 从脚本目录逐级上溯，找到项目根下的 `依赖/` 目录（由 `fan 模块` 物化），
+/// 把其中每个包根作为模块搜索目录返回。包根本身即模块搜索根，因此包内
+/// `库/...` 布局可用与标准库一致的根相对路径导入。Go 端有对称实现。
+fn dependency_dirs(start: &str) -> Vec<String> {
+    const DEPS_DIR: &str = "依赖";
+    let mut current = match std::path::absolute(PathBuf::from(start)) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    // start 可能是脚本文件所在目录，也可能直接是某文件路径；统一按目录上溯。
+    if current.is_file() {
+        current = match current.parent() {
+            Some(p) => p.to_path_buf(),
+            None => return Vec::new(),
+        };
+    }
+    for _ in 0..8 {
+        let deps = current.join(DEPS_DIR);
+        if deps.is_dir() {
+            let mut roots = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&deps) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        roots.push(path.to_string_lossy().to_string());
+                    }
+                }
+            }
+            roots.sort();
+            return roots;
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    Vec::new()
 }
 
 /// 生成候选文件名：原始路径、加上 `.凡`/`.fan` 后缀。

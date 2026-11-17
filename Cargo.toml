@@ -11,6 +11,7 @@ members = [
     "crates/fan-cli",
     "crates/fan-analysis",
     "crates/fan-lsp",
+    "crates/fan-mod",
 ]
 
 [workspace.package]
@@ -29,9 +30,12 @@ fan-native = { path = "crates/fan-native" }
 fan-testrun = { path = "crates/fan-testrun" }
 fan-analysis = { path = "crates/fan-analysis" }
 fan-lsp = { path = "crates/fan-lsp" }
+fan-mod = { path = "crates/fan-mod" }
 
 thiserror = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 
 [profile.release]
 opt-level = 3

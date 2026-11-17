@@ -22,3 +22,4 @@ fan-testrun = { workspace = true }
 fan-native = { workspace = true }
 fan-analysis = { workspace = true }
 fan-lsp = { workspace = true }
+fan-mod = { workspace = true }
