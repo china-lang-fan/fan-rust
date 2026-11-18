@@ -9,7 +9,7 @@
 //!
 //! 依赖包可以不带 `fan.toml`（纯代码仓库），此时按叶子包处理。
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 
 use crate::git::GitCache;
@@ -25,12 +25,30 @@ pub struct ResolvedPackage {
 }
 
 /// 解析模式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveMode {
     /// 优先复用锁文件中的 commit，仅在缺失或声明变更时重新解析。
     Normal,
-    /// 忽略锁文件，对所有包重新解析（`fan 模块 update`）。
+    /// 忽略锁文件，对所有包重新解析（全量 `fan 模块 update`）。
     ForceUpdate,
+    /// 仅对集合中的包强制联网重解析，其余包仍优先复用锁（单包 `update <名称>`）。
+    ForceOnly(BTreeSet<String>),
+}
+
+impl ResolveMode {
+    /// 该包是否需要忽略锁、强制重新解析。
+    fn forces(&self, name: &str) -> bool {
+        match self {
+            ResolveMode::Normal => false,
+            ResolveMode::ForceUpdate => true,
+            ResolveMode::ForceOnly(names) => names.contains(name),
+        }
+    }
+
+    /// 强制解析时是否必须联网取远端最新（全量/单包强制都需要）。
+    fn is_forced(&self) -> bool {
+        !matches!(self, ResolveMode::Normal)
+    }
 }
 
 /// 待解析队列项：包声明加上到达它的祖先链路（用于循环检测与冲突报错）。
@@ -45,7 +63,7 @@ pub fn resolve(
     cache: &GitCache,
     root_deps: &BTreeMap<String, GitDep>,
     lock: &Lockfile,
-    mode: ResolveMode,
+    mode: &ResolveMode,
 ) -> Result<Vec<ResolvedPackage>, String> {
     let mut queue = VecDeque::new();
     for (name, dep) in root_deps {
@@ -121,22 +139,27 @@ pub fn resolve(
     Ok(resolved.into_values().collect())
 }
 
-/// 按模式决定 commit 来源：普通模式复用匹配的锁条目，更新模式或未命中时查 git。
+/// 按模式决定 commit 来源：非强制且锁匹配时复用锁；否则查 git，强制模式联网取
+/// 远端最新，普通解析走离线优先的本地对象。
 fn resolve_commit(
     cache: &GitCache,
     lock: &Lockfile,
-    mode: ResolveMode,
+    mode: &ResolveMode,
     name: &str,
     dep: &GitDep,
 ) -> Result<String, String> {
-    if mode == ResolveMode::Normal {
+    if !mode.forces(name) {
         if let Some(locked) = lock.find(name) {
             if locked.仓库 == dep.仓库 && locked.引用 == dep.引用 {
                 return Ok(locked.提交.clone());
             }
         }
     }
-    cache.resolve_commit(&dep.仓库, dep.引用.as_deref())
+    if mode.is_forced() {
+        cache.resolve_commit_fresh(&dep.仓库, dep.引用.as_deref())
+    } else {
+        cache.resolve_commit(&dep.仓库, dep.引用.as_deref())
+    }
 }
 
 /// 读取依赖包工作树中的清单；没有清单文件时视为无传递依赖的叶子包。
@@ -231,7 +254,7 @@ mod tests {
             &cache,
             &root_deps,
             &Lockfile::default(),
-            ResolveMode::Normal,
+            &ResolveMode::Normal,
         )
         .unwrap();
         let names: Vec<&str> = graph.iter().map(|p| p.名称.as_str()).collect();
@@ -273,7 +296,7 @@ mod tests {
             &cache,
             &root_deps,
             &Lockfile::default(),
-            ResolveMode::Normal,
+            &ResolveMode::Normal,
         )
         .unwrap_err();
         assert!(err.contains("仓库冲突"), "实际报错：{err}");
@@ -312,7 +335,7 @@ mod tests {
             &cache,
             &root_deps,
             &Lockfile::default(),
-            ResolveMode::Normal,
+            &ResolveMode::Normal,
         )
         .unwrap_err();
         assert!(err.contains("循环依赖"), "实际报错：{err}");

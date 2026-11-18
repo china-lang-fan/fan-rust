@@ -12,6 +12,6 @@ pub mod git;
 pub mod graph;
 pub mod manifest;
 
-pub use commands::{add, init, install, remove, tidy, update, Report};
+pub use commands::{add, init, install, list_tags, remove, tidy, update, upgrade, Report};
 pub use graph::{resolve, ResolveMode, ResolvedPackage};
 pub use manifest::{find_project_root, GitDep, LockedPackage, Lockfile, Manifest};

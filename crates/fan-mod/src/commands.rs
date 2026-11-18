@@ -76,12 +76,97 @@ pub fn install(dir: &Path) -> Result<Report, String> {
     Ok(report)
 }
 
-/// `fan 模块 update`：忽略锁文件，把所有依赖重新解析到最新 commit 并重新物化。
-pub fn update(dir: &Path) -> Result<Report, String> {
+/// `fan 模块 update [名称...]`：重新解析到最新 commit 并重新物化。
+///
+/// 不带名称时强制刷新全部依赖；带名称时仅这些直接依赖联网重解析，其余包复用锁。
+/// 其传递依赖随新的依赖图自动安装或剪枝。
+pub fn update(dir: &Path, names: Vec<String>) -> Result<Report, String> {
     let root = require_project(dir)?;
     let mut report = Report::default();
-    sync_install(&root, ResolveMode::ForceUpdate, &mut report)?;
+    let mode = if names.is_empty() {
+        ResolveMode::ForceUpdate
+    } else {
+        let manifest = Manifest::load(&root)?;
+        let all = manifest.all_deps();
+        let mut only = std::collections::BTreeSet::new();
+        for name in &names {
+            if !all.contains_key(name) {
+                return Err(format!("清单中没有依赖 {name}"));
+            }
+            only.insert(name.clone());
+        }
+        ResolveMode::ForceOnly(only)
+    };
+    sync_install(&root, mode, &mut report)?;
     report.say("依赖已更新到最新引用".to_string());
+    Ok(report)
+}
+
+/// `fan 模块 标签 <名称>`：列出该依赖仓库的全部 tag，并标注当前声明的引用。
+pub fn list_tags(dir: &Path, name: &str) -> Result<Report, String> {
+    let root = require_project(dir)?;
+    let manifest = Manifest::load(&root)?;
+    let dep = manifest
+        .all_deps()
+        .get(name)
+        .cloned()
+        .ok_or_else(|| format!("清单中没有依赖 {name}"))?;
+    let cache = GitCache::new()?;
+    let tags = cache.list_tags(&dep.仓库)?;
+
+    let mut report = Report::default();
+    report.say(format!("依赖 {name} 的可用标签（共 {} 个）：", tags.len()));
+    if tags.is_empty() {
+        report.say("（仓库暂无 tag）".to_string());
+        return Ok(report);
+    }
+    for tag in &tags {
+        let current = dep.引用.as_deref() == Some(tag.as_str());
+        if current {
+            report.say(format!("  {tag}（当前）"));
+        } else {
+            report.say(format!("  {tag}"));
+        }
+    }
+    Ok(report)
+}
+
+/// `fan 模块 升级 <名称> <tag>`：把直接依赖切换到指定 tag（支持升级与降级）。
+///
+/// 修改清单引用后按普通模式重解析：仅该包因引用变更而重新解析，其余包复用锁；
+/// 其传递依赖随新依赖图自动安装或剪枝。tag 不存在时提前报错并列出可用标签。
+pub fn upgrade(dir: &Path, name: &str, tag: &str) -> Result<Report, String> {
+    let root = require_project(dir)?;
+    let mut manifest = Manifest::load(&root)?;
+    let dep = manifest
+        .all_deps()
+        .get(name)
+        .cloned()
+        .ok_or_else(|| format!("清单中没有依赖 {name}"))?;
+
+    let cache = GitCache::new()?;
+    let tags = cache.list_tags(&dep.仓库)?;
+    if !tags.iter().any(|t| t == tag) {
+        let available = if tags.is_empty() {
+            "仓库暂无 tag".to_string()
+        } else {
+            format!("可用标签：{}", tags.join("、"))
+        };
+        return Err(format!("仓库 {0} 不存在标签 {tag}。{available}", dep.仓库));
+    }
+
+    let previous = dep.引用.clone().unwrap_or_else(|| "默认分支".to_string());
+    // 同时处理普通依赖与开发依赖两张表（名称唯一）。
+    if let Some(slot) = manifest.依赖.get_mut(name) {
+        slot.引用 = Some(tag.to_string());
+    } else if let Some(slot) = manifest.开发依赖.get_mut(name) {
+        slot.引用 = Some(tag.to_string());
+    }
+    manifest.save(&root)?;
+
+    let mut report = Report::default();
+    sync_install(&root, ResolveMode::Normal, &mut report)?;
+    report.say(format!("已将 {name} 从 {previous} 切换到 {tag}"));
     Ok(report)
 }
 
@@ -113,7 +198,7 @@ fn sync_install(
     let lock = Lockfile::load(root)?;
     let cache = GitCache::new()?;
 
-    let graph = resolve(&cache, &manifest.all_deps(), &lock, mode)?;
+    let graph = resolve(&cache, &manifest.all_deps(), &lock, &mode)?;
 
     let mut next_lock = Lockfile::default();
     for pkg in &graph {

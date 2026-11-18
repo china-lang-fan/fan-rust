@@ -310,7 +310,16 @@ fn run_mod(rest: &[String]) -> Result<(), String> {
             fan_mod::add(&cwd, name, repo, reference)?
         }
         "install" => fan_mod::install(&cwd)?,
-        "update" => fan_mod::update(&cwd)?,
+        "update" => fan_mod::update(&cwd, params.to_vec())?,
+        "标签" | "tags" => {
+            let name = params.first().ok_or("用法：fan 模块 标签 <名称>")?;
+            fan_mod::list_tags(&cwd, name)?
+        }
+        "升级" | "upgrade" => {
+            let name = params.first().ok_or("用法：fan 模块 升级 <名称> <tag>")?;
+            let tag = params.get(1).ok_or("用法：fan 模块 升级 <名称> <tag>")?;
+            fan_mod::upgrade(&cwd, name, tag)?
+        }
         "remove" => {
             let name = params.first().ok_or("用法：fan 模块 remove <名称>")?;
             fan_mod::remove(&cwd, name)?
@@ -335,7 +344,9 @@ fn mod_usage_text() -> String {
      \x20 fan 模块 init [名称]                 生成 fan.toml 清单\n\
      \x20 fan 模块 add <名称> <git仓库> [引用]  添加 git 依赖并安装\n\
      \x20 fan 模块 install                     按清单与锁文件安装全部依赖（含传递依赖）\n\
-     \x20 fan 模块 update                      忽略锁文件，重新解析全部依赖到最新提交\n\
+     \x20 fan 模块 update [名称...]            重新解析到最新提交（不带名称=全部）\n\
+     \x20 fan 模块 标签 <名称>                 列出该依赖仓库的全部 tag\n\
+     \x20 fan 模块 升级 <名称> <tag>           把依赖切换到指定 tag（支持升级/降级）\n\
      \x20 fan 模块 remove <名称>               移除依赖\n\
      \x20 fan 模块 tidy                        检查依赖与导入是否一致"
         .to_string()
