@@ -1,0 +1,15 @@
+[package]
+name = "fan-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "凡语言栈式字节码虚拟机（取指-译码-执行，复用 fan-object 值模型）"
+
+[lib]
+name = "fan_vm"
+path = "src/lib.rs"
+
+[dependencies]
+fan-code = { workspace = true }
+fan-object = { workspace = true }

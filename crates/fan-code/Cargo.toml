@@ -1,0 +1,11 @@
+[package]
+name = "fan-code"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "凡语言字节码契约、代码生成与产物序列化（编译期，不含执行逻辑）"
+
+[lib]
+name = "fan_code"
+path = "src/lib.rs"

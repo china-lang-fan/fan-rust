@@ -12,6 +12,8 @@ members = [
     "crates/fan-analysis",
     "crates/fan-lsp",
     "crates/fan-mod",
+    "crates/fan-code",
+    "crates/fan-vm",
 ]
 
 [workspace.package]
@@ -31,6 +33,8 @@ fan-testrun = { path = "crates/fan-testrun" }
 fan-analysis = { path = "crates/fan-analysis" }
 fan-lsp = { path = "crates/fan-lsp" }
 fan-mod = { path = "crates/fan-mod" }
+fan-code = { path = "crates/fan-code" }
+fan-vm = { path = "crates/fan-vm" }
 
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
