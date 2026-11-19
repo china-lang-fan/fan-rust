@@ -17,3 +17,4 @@ fan-object = { workspace = true }
 
 [dev-dependencies]
 fan-parser = { workspace = true }
+fan-native = { workspace = true }

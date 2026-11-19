@@ -178,6 +178,7 @@ version = "0.8.0"
 dependencies = [
  "fan-ast",
  "fan-code",
+ "fan-native",
  "fan-object",
  "fan-parser",
 ]

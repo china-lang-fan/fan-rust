@@ -90,6 +90,10 @@ pub enum Opcode {
     UnaryOp(u16) = 30,
     /// 栈顶为函数时零参调用，否则原样保留（对应无括号 `MaybeCall` 的运行期判定）。
     CallIfFunc = 31,
+    /// 弹出栈顶元组，取前 `[u16]` 个元素按序压栈（多目标声明/赋值解构）。
+    UnpackTuple(u16) = 32,
+    /// 把当前函数帧实际收到的实参个数压栈（用于默认参数的缺省判定）。
+    ArgCount = 33,
 }
 
 impl Opcode {
@@ -104,7 +108,8 @@ impl Opcode {
             | Opcode::Return
             | Opcode::Throw
             | Opcode::Recover
-            | Opcode::CallIfFunc => 0,
+            | Opcode::CallIfFunc
+            | Opcode::ArgCount => 0,
 
             Opcode::Const(_)
             | Opcode::LoadLocal(_)
@@ -121,7 +126,8 @@ impl Opcode {
             | Opcode::BuildTuple(_)
             | Opcode::LoadModule(_)
             | Opcode::BinOp(_)
-            | Opcode::UnaryOp(_) => 2,
+            | Opcode::UnaryOp(_)
+            | Opcode::UnpackTuple(_) => 2,
 
             Opcode::Jump(_) | Opcode::JumpIfFalse(_) | Opcode::JumpIfTrue(_) => 4,
 
@@ -176,6 +182,8 @@ impl Opcode {
             29 => Some(Opcode::BinOp(0)),
             30 => Some(Opcode::UnaryOp(0)),
             31 => Some(Opcode::CallIfFunc),
+            32 => Some(Opcode::UnpackTuple(0)),
+            33 => Some(Opcode::ArgCount),
             _ => None,
         }
     }

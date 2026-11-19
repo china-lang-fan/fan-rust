@@ -60,6 +60,8 @@ fn decode_instruction(code: &[u8], start: usize) -> Result<(Opcode, usize), Stri
         Opcode::BinOp(_) => Opcode::BinOp(u16_at(0)),
         Opcode::UnaryOp(_) => Opcode::UnaryOp(u16_at(0)),
         Opcode::CallIfFunc => Opcode::CallIfFunc,
+        Opcode::UnpackTuple(_) => Opcode::UnpackTuple(u16_at(0)),
+        Opcode::ArgCount => Opcode::ArgCount,
     };
     Ok((op, 1 + operand_size))
 }
@@ -113,6 +115,9 @@ fn render(op: &Opcode, chunk: &Chunk) -> String {
         Opcode::LoadModule(i) => format!("LOAD_MODULE {i} ；{}", const_str(*i)),
         Opcode::BinOp(i) => format!("BIN_OP {i} ；{}", const_str(*i)),
         Opcode::UnaryOp(i) => format!("UNARY_OP {i} ；{}", const_str(*i)),
+        Opcode::CallIfFunc => "CALL_IF_FUNC".to_string(),
+        Opcode::UnpackTuple(n) => format!("UNPACK_TUPLE {n}"),
+        Opcode::ArgCount => "ARG_COUNT".to_string(),
         other => format!("{other:?}"),
     }
 }

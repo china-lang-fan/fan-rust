@@ -9,6 +9,8 @@ pub struct Frame {
     pub ip: usize,
     /// 本帧局部槽位在 VM 槽位数组中的基址。
     pub slot_base: usize,
+    /// 实际收到的实参个数（模块入口为 0），供默认参数缺省判定读取。
+    pub argc: usize,
 }
 
 impl Frame {
@@ -20,16 +22,17 @@ impl Frame {
             function_index: Frame::ENTRY,
             ip: 0,
             slot_base,
+            argc: 0,
         }
     }
 
     /// 函数帧构造器，函数调用里程碑（M1）启用。
-    #[allow(dead_code)]
-    pub fn function(function_index: u16, slot_base: usize) -> Self {
+    pub fn function(function_index: u16, slot_base: usize, argc: usize) -> Self {
         Frame {
             function_index,
             ip: 0,
             slot_base,
+            argc,
         }
     }
 }

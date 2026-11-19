@@ -192,6 +192,40 @@ impl<'m> Vm<'m> {
                         self.call_value(0)?;
                     }
                 }
+                Opcode::UnpackTuple(_) => {
+                    let count = self.read_u16(&chunk)? as usize;
+                    let value = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| VmError::new("UnpackTuple 时值栈为空"))?;
+                    let elements = match value {
+                        Object::Tuple(items) => items,
+                        other => {
+                            return Err(VmError::new(format!(
+                                "多目标解构要求元组，实际为 {}",
+                                other.kind()
+                            )))
+                        }
+                    };
+                    if elements.len() < count {
+                        return Err(VmError::new(format!(
+                            "元组元素 {} 个，不足以解构 {count} 个目标",
+                            elements.len()
+                        )));
+                    }
+                    for element in elements.iter().take(count) {
+                        self.stack.push(element.clone());
+                    }
+                }
+                Opcode::BuildTuple(_) => {
+                    let count = self.read_u16(&chunk)? as usize;
+                    let elements = self.pop_args(count)?;
+                    self.stack.push(Object::tuple(elements));
+                }
+                Opcode::ArgCount => {
+                    let argc = self.frames.last().expect("帧存在").argc;
+                    self.stack.push(Object::Int(argc as i64));
+                }
                 Opcode::CallNative(_, _) => {
                     let idx = self.read_u16(&chunk)? as usize;
                     let argc = self.read_u8(&chunk)? as usize;
@@ -260,17 +294,39 @@ impl<'m> Vm<'m> {
     }
 
     fn invoke_bytecode_function(&mut self, index: u16, args: Vec<Object>) -> VmResult<()> {
-        let arity = self.module.functions[index as usize].arity.fixed;
-        if args.len() != arity {
+        let func = &self.module.functions[index as usize];
+        let fixed = func.arity.fixed;
+        let variadic = func.arity.variadic;
+        let min_required = fixed - func.arity.optional;
+        let name = func.name.clone();
+        if args.len() < min_required {
             return Err(VmError::new(format!(
-                "函数 {} 参数个数不符：期望 {arity}，实得 {}",
-                self.module.functions[index as usize].name,
+                "函数 {name} 需要至少 {min_required} 个参数，实际 {} 个",
+                args.len()
+            )));
+        }
+        if !variadic && args.len() > fixed {
+            return Err(VmError::new(format!(
+                "函数 {name} 最多接受 {fixed} 个参数，实际 {} 个",
                 args.len()
             )));
         }
         let base = self.slots.len();
-        self.slots.extend(args);
-        self.frames.push(Frame::function(index, base));
+        // 固定参数槽：有实参取实参，缺省先填空，函数序言再按默认值回填。
+        for idx in 0..fixed {
+            let value = args.get(idx).cloned().unwrap_or(Object::Nil);
+            self.slots.push(value);
+        }
+        // 可变参数末槽：把超出固定参数的实参收束为数组（无多余则空数组）。
+        if variadic {
+            let rest = if args.len() > fixed {
+                args[fixed..].to_vec()
+            } else {
+                Vec::new()
+            };
+            self.slots.push(Object::array(rest));
+        }
+        self.frames.push(Frame::function(index, base, args.len()));
         let result = self.execute()?;
         self.frames.pop();
         // 回收本帧槽位。

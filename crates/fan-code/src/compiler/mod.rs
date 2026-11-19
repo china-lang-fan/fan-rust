@@ -107,6 +107,26 @@ impl Compiler {
                 self.compile_expr(&a.value)?;
                 self.emit_store_name(&a.name)
             }
+            Stmt::MultiDecl(d) => {
+                self.line(d.pos.line as u32);
+                self.compile_expr(&d.value)?;
+                self.builder.emit(Opcode::UnpackTuple(d.names.len() as u16));
+                // 栈上现为按序的 n 个值，逆序弹出写入各名字槽位。
+                for name in d.names.iter().rev() {
+                    let slot = self.scope.declare(name);
+                    self.builder.emit(Opcode::StoreLocal(slot));
+                }
+                Ok(())
+            }
+            Stmt::MultiAssign(a) => {
+                self.line(a.pos.line as u32);
+                self.compile_expr(&a.value)?;
+                self.builder.emit(Opcode::UnpackTuple(a.names.len() as u16));
+                for name in a.names.iter().rev() {
+                    self.emit_store_name(name)?;
+                }
+                Ok(())
+            }
             Stmt::Expr(e) => {
                 self.line(e.pos.line as u32);
                 self.compile_expr(&e.expr)?;
@@ -119,6 +139,8 @@ impl Compiler {
             Stmt::Block(b) => self.compile_block(&b.statements),
             Stmt::If(if_stmt) => self.compile_if(if_stmt),
             Stmt::While(w) => self.compile_while(w),
+            Stmt::Repeat(r) => self.compile_repeat(r),
+            Stmt::Times(t) => self.compile_times(t),
             Stmt::Return(r) => {
                 self.line(r.pos.line as u32);
                 match r.values.as_slice() {
@@ -192,6 +214,52 @@ impl Compiler {
         Ok(())
     }
 
+    /// `重复 ... 直到 条件`：后判断循环，至少执行一次，条件为真时退出。
+    fn compile_repeat(&mut self, r: &fan_ast::stmt::RepeatStmt) -> CompileResult<()> {
+        self.line(r.pos.line as u32);
+        let loop_start = self.builder.code_len() as u32;
+        self.compile_block(&r.body.statements)?;
+        self.compile_expr(&r.until)?;
+        let exit = self.builder.emit(Opcode::JumpIfTrue(0));
+        self.builder.emit(Opcode::Pop);
+        self.builder.emit(Opcode::Jump(loop_start));
+        self.builder.patch_jump(exit);
+        self.builder.emit(Opcode::Pop);
+        Ok(())
+    }
+
+    /// `重复 N 次`：把计数存入隐藏槽位，每轮递减，归零退出。
+    fn compile_times(&mut self, t: &fan_ast::stmt::TimesStmt) -> CompileResult<()> {
+        self.line(t.pos.line as u32);
+        self.compile_expr(&t.count)?;
+        let counter = self.scope.declare("__times_counter__");
+        self.builder.emit(Opcode::StoreLocal(counter));
+
+        let loop_start = self.builder.code_len() as u32;
+        self.builder.emit(Opcode::LoadLocal(counter));
+        let zero = self.builder.add_constant(ConstValue::Int(0));
+        self.builder.emit(Opcode::Const(zero));
+        let op = self.add_string_const("小于等于");
+        self.builder.emit(Opcode::BinOp(op));
+        let exit = self.builder.emit(Opcode::JumpIfTrue(0));
+        self.builder.emit(Opcode::Pop);
+
+        self.compile_block(&t.body.statements)?;
+
+        // counter = counter - 1
+        self.builder.emit(Opcode::LoadLocal(counter));
+        let one = self.builder.add_constant(ConstValue::Int(1));
+        self.builder.emit(Opcode::Const(one));
+        let sub = self.add_string_const("减");
+        self.builder.emit(Opcode::BinOp(sub));
+        self.builder.emit(Opcode::StoreLocal(counter));
+        self.builder.emit(Opcode::Jump(loop_start));
+
+        self.builder.patch_jump(exit);
+        self.builder.emit(Opcode::Pop);
+        Ok(())
+    }
+
     fn compile_expr(&mut self, expr: &Expr) -> CompileResult<()> {
         match expr {
             Expr::Integer(n) => {
@@ -243,11 +311,28 @@ impl Compiler {
             }
             Expr::Binary(b) => {
                 self.line(b.pos.line as u32);
-                self.compile_expr(&b.left)?;
-                self.compile_expr(&b.right)?;
-                let op = self.add_string_const(&b.op);
-                self.builder.emit(Opcode::BinOp(op));
-                Ok(())
+                // 短路逻辑：左值保留在栈上，满足条件时直接作为结果，不计算右值。
+                if b.op == "且" || b.op == "&&" {
+                    self.compile_expr(&b.left)?;
+                    let skip = self.builder.emit(Opcode::JumpIfFalse(0));
+                    self.builder.emit(Opcode::Pop); // 左值为真：弹出后求右值
+                    self.compile_expr(&b.right)?;
+                    self.builder.patch_jump(skip);
+                    Ok(())
+                } else if b.op == "或" || b.op == "||" {
+                    self.compile_expr(&b.left)?;
+                    let skip = self.builder.emit(Opcode::JumpIfTrue(0));
+                    self.builder.emit(Opcode::Pop); // 左值为假：弹出后求右值
+                    self.compile_expr(&b.right)?;
+                    self.builder.patch_jump(skip);
+                    Ok(())
+                } else {
+                    self.compile_expr(&b.left)?;
+                    self.compile_expr(&b.right)?;
+                    let op = self.add_string_const(&b.op);
+                    self.builder.emit(Opcode::BinOp(op));
+                    Ok(())
+                }
             }
             Expr::Call(call) => self.compile_call(call),
             Expr::MaybeCall(maybe) => {
@@ -260,6 +345,15 @@ impl Compiler {
                 Ok(())
             }
             Expr::Function(f) => self.compile_function_literal(f),
+            Expr::Tuple(t) => {
+                self.line(t.pos.line as u32);
+                for element in &t.elements {
+                    self.compile_expr(element)?;
+                }
+                self.builder
+                    .emit(Opcode::BuildTuple(t.elements.len() as u16));
+                Ok(())
+            }
             other => Err(format!(
                 "字节码编译器暂不支持的表达式：{}",
                 expr_kind_name(other)
@@ -304,8 +398,46 @@ impl Compiler {
         let mut child = Compiler::new();
         child.in_module = false;
         child.params = f.params.iter().map(|p| p.name.clone()).collect();
+        let has_variadic = f.params.iter().any(|p| p.variadic);
+        // 固定参数（非可变参数）按出现顺序占据 0..fixed；可变参数固定落在末槽，
+        // 由 VM 把多余实参收束为数组写入。
+        let mut fixed_index: u16 = 0;
+        for param in &f.params {
+            if param.variadic {
+                let slot = f.params.len() as u16 - 1;
+                child.scope.declare_at(&param.name, slot);
+            } else {
+                child.scope.declare_at(&param.name, fixed_index);
+                fixed_index += 1;
+            }
+        }
+        // 函数体序言：为每个带默认值的参数在“实参不足”时求值默认表达式并写回槽位。
+        // 默认值表达式可引用更早的参数与外层闭包，与树遍历求值器的调用期求值一致。
+        let fixed_count = f.params.iter().filter(|p| !p.variadic).count();
         for (idx, param) in f.params.iter().enumerate() {
-            child.scope.declare_at(&param.name, idx as u16);
+            if let Some(default) = &param.default {
+                child.line(f.pos.line as u32);
+                child.builder.emit(Opcode::ArgCount);
+                let const_idx = child.builder.add_constant(ConstValue::Int(idx as i64));
+                child.builder.emit(Opcode::Const(const_idx));
+                // argc <= idx 表示实参未覆盖到该参数位置，需要使用默认值。
+                let op = child.add_string_const("小于等于");
+                child.builder.emit(Opcode::BinOp(op));
+                // 复制一份比较值：缺省路径弹出副本后求值默认表达式；
+                // 已传参路径跳过默认值块，在块尾弹出原始比较值。两条路径栈平衡。
+                child.builder.emit(Opcode::Dup);
+                let skip_default = child.builder.emit(Opcode::JumpIfFalse(0));
+                child.builder.emit(Opcode::Pop); // 缺省路径：弹出比较值副本
+                child.compile_expr(default)?;
+                let slot = if param.variadic {
+                    f.params.len() as u16 - 1
+                } else {
+                    idx as u16
+                };
+                child.builder.emit(Opcode::StoreLocal(slot));
+                child.builder.patch_jump(skip_default);
+                child.builder.emit(Opcode::Pop); // 已传参路径：弹出原始比较值
+            }
         }
         child.compile_statements(&f.body.statements)?;
         let nil = child.builder.add_constant(ConstValue::Nil);
@@ -313,8 +445,8 @@ impl Compiler {
         child.builder.emit(Opcode::Return);
 
         let arity = Arity {
-            fixed: f.params.len(),
-            variadic: f.params.iter().any(|p| p.variadic),
+            fixed: fixed_count,
+            variadic: has_variadic,
             optional: f.params.iter().filter(|p| p.default.is_some()).count(),
         };
         let chunk = FunctionChunk {
