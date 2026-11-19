@@ -20,6 +20,52 @@ use std::rc::Rc;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// 执行引擎：树遍历求值器（默认）或栈式字节码虚拟机。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Engine {
+    #[default]
+    Tree,
+    Vm,
+}
+
+impl Engine {
+    fn parse(value: &str) -> Result<Engine, String> {
+        match value {
+            "tree" | "树" => Ok(Engine::Tree),
+            "vm" | "虚拟机" => Ok(Engine::Vm),
+            other => Err(format!("未知引擎：{other}（可选 tree/树 或 vm/虚拟机）")),
+        }
+    }
+}
+
+/// 从 `运行` 的参数中剥离 `--engine=<引擎>` / `--engine <引擎>`（含中文
+/// `--引擎`），返回所选引擎与剩余的位置参数。默认树遍历引擎。
+fn split_engine_args(args: &[String]) -> Result<(Engine, Vec<String>), String> {
+    let mut engine = Engine::Tree;
+    let mut positional = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if let Some(rest) = arg
+            .strip_prefix("--engine=")
+            .or_else(|| arg.strip_prefix("--引擎="))
+        {
+            engine = Engine::parse(rest)?;
+            i += 1;
+        } else if arg == "--engine" || arg == "--引擎" {
+            let value = args
+                .get(i + 1)
+                .ok_or_else(|| "--engine 需要一个值（tree 或 vm）".to_string())?;
+            engine = Engine::parse(value)?;
+            i += 2;
+        } else {
+            positional.push(arg.clone());
+            i += 1;
+        }
+    }
+    Ok((engine, positional))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(args) {
@@ -40,9 +86,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
     match args[0].as_str() {
         "运行" | "run" => {
             if args.len() < 2 {
-                return Err("用法：fan 运行 <脚本.凡> [参数...]".to_string());
+                return Err("用法：fan 运行 <脚本.凡> [--engine=tree|vm] [参数...]".to_string());
             }
-            run_file(&args[1], &args[2..])
+            let path = &args[1];
+            let (engine, script_args) = split_engine_args(&args[2..])?;
+            run_file(path, &script_args, engine)
         }
         "测试" | "test" => {
             let target = args.get(1).map(|s| s.as_str()).unwrap_or(".");
@@ -76,7 +124,7 @@ fn usage_text() -> String {
         "凡语言 {}（命令名：fan）\n\
          \n\
           用法：\n\
-          \x20 fan 运行 <脚本.凡> [参数...]   执行脚本\n\
+          \x20 fan 运行 <脚本.凡> [--engine=tree|vm] [参数...]   执行脚本（默认 tree 引擎，vm 为字节码虚拟机）\n\
           \x20 fan 测试 [目录或文件]          执行 *_测试.凡 中的测试函数\n\
           \x20 fan 检查 [目录或文件]          静态检查（不运行），报告未定义名、坏导入等\n\
           \x20 fan 交互                      进入交互式求值（REPL）\n\
@@ -91,7 +139,7 @@ fn usage_text() -> String {
 }
 
 /// 执行一个脚本文件。
-fn run_file(path: &str, script_args: &[String]) -> Result<(), String> {
+fn run_file(path: &str, script_args: &[String], engine: Engine) -> Result<(), String> {
     let source = std::fs::read_to_string(path).map_err(|e| format!("无法读取 {}: {}", path, e))?;
     let (program, errors) = parse_program(&source);
     if !errors.is_empty() {
@@ -110,8 +158,25 @@ fn run_file(path: &str, script_args: &[String]) -> Result<(), String> {
     let rt = Rc::new(RefCell::new(Runtime::new()));
     rt.borrow_mut()
         .set_process_context(abs.clone(), script_args.to_vec());
-    let mut interp = Interpreter::for_script(rt, default_modules_dirs(&dir), &dir, &abs);
-    interp.run(&program).map_err(|e| e.display())?;
+    match engine {
+        Engine::Tree => {
+            let mut interp = Interpreter::for_script(rt, default_modules_dirs(&dir), &dir, &abs);
+            interp.run(&program).map_err(|e| e.display())?;
+        }
+        Engine::Vm => run_vm(&program, rt)?,
+    }
+    Ok(())
+}
+
+/// 以栈式字节码虚拟机执行已解析的程序：先 AST→ModuleChunk 编译，再取指执行。
+///
+/// VM 当前只覆盖 M1 子集，遇到编译器不支持的语法会返回明确错误，由调用方提示
+/// 回退到默认树遍历引擎。
+fn run_vm(program: &fan_ast::Program, rt: Rc<RefCell<Runtime>>) -> Result<(), String> {
+    fan_eval::register_builtins(&mut rt.borrow_mut());
+    let module = fan_code::compiler::compile_program(program)?;
+    let mut vm = fan_vm::Vm::new(&module, rt);
+    vm.run().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -448,6 +513,111 @@ mod tests {
     fn 缺少文件名时给出用法() {
         let err = run(args(&["运行"])).unwrap_err();
         assert!(err.contains("用法"), "实际：{}", err);
+    }
+
+    #[test]
+    fn 解析引擎开关支持中英文与等号写法() {
+        let (engine, rest) = split_engine_args(&args(&["--engine=vm", "a", "b"])).unwrap();
+        assert_eq!(engine, Engine::Vm);
+        assert_eq!(rest, args(&["a", "b"]));
+
+        let (engine, rest) = split_engine_args(&args(&["--engine", "tree", "脚本.凡"])).unwrap();
+        assert_eq!(engine, Engine::Tree);
+        assert_eq!(rest, args(&["脚本.凡"]));
+
+        let (engine, _) = split_engine_args(&args(&["--引擎=虚拟机"])).unwrap();
+        assert_eq!(engine, Engine::Vm);
+
+        let (engine, _) = split_engine_args(&args(&["--引擎", "树"])).unwrap();
+        assert_eq!(engine, Engine::Tree);
+
+        // 不带开关时默认树引擎。
+        let (engine, rest) = split_engine_args(&args(&["脚本.凡"])).unwrap();
+        assert_eq!(engine, Engine::Tree);
+        assert_eq!(rest, args(&["脚本.凡"]));
+    }
+
+    #[test]
+    fn 未知引擎名报错() {
+        let err = split_engine_args(&args(&["--engine=llvm"])).unwrap_err();
+        assert!(err.contains("未知引擎"), "实际：{err}");
+        let err = split_engine_args(&args(&["--engine"])).unwrap_err();
+        assert!(err.contains("需要一个值"), "实际：{err}");
+    }
+
+    /// 用独立内存输出缓冲跑一个引擎，返回捕获到的 stdout 文本。
+    fn run_engine_captured(source: &str, engine: Engine) -> Result<String, String> {
+        use std::io::Cursor;
+        let (program, errors) = parse_program(source);
+        assert!(errors.is_empty(), "测试源码不应有解析错误：{:?}", errors.0);
+        let sink: Rc<RefCell<Cursor<Vec<u8>>>> = Rc::new(RefCell::new(Cursor::new(Vec::new())));
+        let rt = Rc::new(RefCell::new(Runtime::with_output(sink.clone())));
+        match engine {
+            Engine::Tree => {
+                let mut interp = Interpreter::new_with_runtime(rt);
+                interp.run(&program).map_err(|e| e.display())?;
+            }
+            Engine::Vm => {
+                fan_eval::register_builtins(&mut rt.borrow_mut());
+                let module = fan_code::compiler::compile_program(&program)?;
+                let mut vm = fan_vm::Vm::new(&module, rt);
+                vm.run().map_err(|e| e.to_string())?;
+            }
+        }
+        let bytes = sink.borrow().get_ref().clone();
+        String::from_utf8(bytes).map_err(|e| format!("输出不是合法 UTF-8：{e}"))
+    }
+
+    /// 双引擎对拍：同一源码在 tree 与 vm 下的 stdout 必须逐字节一致。
+    /// 仅覆盖 VM 当前支持的 M1 子集；不支持的语法（下标/对象/导入等）不在此列。
+    fn assert_engines_agree(source: &str) {
+        let tree = run_engine_captured(source, Engine::Tree)
+            .unwrap_or_else(|e| panic!("tree 引擎失败：{e}"));
+        let vm =
+            run_engine_captured(source, Engine::Vm).unwrap_or_else(|e| panic!("vm 引擎失败：{e}"));
+        assert_eq!(tree, vm, "双引擎输出不一致\n源码：\n{source}");
+    }
+
+    #[test]
+    fn 双引擎对拍算术与变量() {
+        assert_engines_agree("打印行(1 加 2 乘 3)\n变量 甲 = 10\n打印行(甲 减 4)\n");
+    }
+
+    #[test]
+    fn 双引擎对拍条件与短路() {
+        let src =
+            "变量 甲 = 7\n如果 甲 大于 5 那么\n  打印行(\"大\")\n否则\n  打印行(\"小\")\n结束\n\
+                   打印行(假 或 真)\n打印行(真 且 假)\n";
+        assert_engines_agree(src);
+    }
+
+    #[test]
+    fn 双引擎对拍循环() {
+        let src = "变量 和 = 0\n变量 序号 = 1\n当 序号 小于等于 5 循环\n  和 = 和 加 序号\n  序号 = 序号 加 1\n结束\n打印行(和)\n\
+                   变量 计数 = 0\n重复 4 次\n  计数 = 计数 加 1\n结束\n打印行(计数)\n";
+        assert_engines_agree(src);
+    }
+
+    #[test]
+    fn 双引擎对拍函数与默认可变参数() {
+        let src = "函数 加法(整数 a, 整数 b = 10)\n  返回 a 加 b\n结束\n\
+                   打印行(加法(5))\n打印行(加法(5, 6))\n\
+                   函数 收集(任意 头, 任意... 尾)\n  打印行(长度(尾))\n结束\n收集(1, 2, 3)\n";
+        assert_engines_agree(src);
+    }
+
+    #[test]
+    fn 双引擎对拍多返回值解构() {
+        let src = "函数 交换(整数 a, 整数 b)\n  返回 b、a\n结束\n\
+                   变量 甲、乙 = 交换(1, 2)\n打印行(甲)\n打印行(乙)\n";
+        assert_engines_agree(src);
+    }
+
+    #[test]
+    fn vm遇到不支持的语法返回明确错误() {
+        // 下标属 M2，VM 编译器应给出可识别的“暂不支持”错误而非 panic。
+        let err = run_engine_captured("变量 组 = 空\n打印行(组[0])\n", Engine::Vm).unwrap_err();
+        assert!(err.contains("暂不支持"), "实际：{err}");
     }
 
     #[test]

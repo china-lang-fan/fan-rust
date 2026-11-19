@@ -63,6 +63,34 @@ impl Default for Interpreter {
     }
 }
 
+/// 在运行实例上注册全部内建（core + ext）并补上无需导入即可用的中文别名
+/// （`打印`/`打印行`/`长度`/`追加`/`错误`）。
+///
+/// 树遍历求值器与栈式字节码 VM 共用同一份注册逻辑，保证两个引擎看到的
+/// 原生能力与命名完全一致。
+pub fn register_builtins(rt: &mut Runtime) {
+    fan_native::register_natives(rt);
+    // 复用 core 的 print，避免同一能力出现两份实现
+    let print = rt.lookup_native("print").expect("core 组应提供 print");
+    rt.register_native(Rc::new(Builtin::new("打印", None, print.func.clone())));
+    rt.register_native(Rc::new(Builtin::new(
+        "打印行",
+        None,
+        Rc::new(|rt, args| {
+            rt.print_line(&args);
+            Ok(vec![])
+        }),
+    )));
+    // 常用内建的中文名：不必导入 系统 模块就能直接使用。
+    // 这些名字在标准库里也有同名导出（系统.追加 等），二者互不冲突。
+    for (chinese, english) in [("长度", "len"), ("追加", "append"), ("错误", "error")] {
+        let src = rt
+            .lookup_native(english)
+            .unwrap_or_else(|| panic!("core 组应提供 {english}"));
+        rt.register_native(Rc::new(Builtin::new(chinese, None, src.func.clone())));
+    }
+}
+
 impl Interpreter {
     /// 创建解释器，并预置最基础的原生函数（`打印`/`打印行`）。
     pub fn new() -> Self {
@@ -76,6 +104,13 @@ impl Interpreter {
     /// 创建把输出写入指定缓冲区的解释器（供测试捕获输出）。
     pub fn with_output(sink: fan_object::Output) -> Self {
         let rt = Rc::new(RefCell::new(Runtime::with_output(sink)));
+        Self::new_with_runtime(rt)
+    }
+
+    /// 在调用方给定的运行实例上创建解释器：空模块搜索路径、预置全部内建。
+    ///
+    /// 供双引擎对拍等需要外部持有 `Rc<RefCell<Runtime>>` 的装配场景使用。
+    pub fn new_with_runtime(rt: Rc<RefCell<Runtime>>) -> Self {
         let env = Rc::new(RefCell::new(Environment::for_runtime(rt)));
         let loader = Rc::new(RefCell::new(crate::module::Loader::new(Vec::new())));
         let interp = Interpreter::with_parts(env, loader);
@@ -165,27 +200,7 @@ impl Interpreter {
     /// `系统.凡` 的 `打印` 则通过 `定义 本地("print") 函数 ...` 绑定到同一份实现。
     fn register_core_natives(&self) {
         let rt = self.env.borrow().runtime();
-        let mut rt = rt.borrow_mut();
-        fan_native::register_natives(&mut rt);
-        // 复用 core 的 print，避免同一能力出现两份实现
-        let print = rt.lookup_native("print").expect("core 组应提供 print");
-        rt.register_native(Rc::new(Builtin::new("打印", None, print.func.clone())));
-        rt.register_native(Rc::new(Builtin::new(
-            "打印行",
-            None,
-            Rc::new(|rt, args| {
-                rt.print_line(&args);
-                Ok(vec![])
-            }),
-        )));
-        // 常用内建的中文名：不必导入 系统 模块就能直接使用。
-        // 这些名字在标准库里也有同名导出（系统.追加 等），二者互不冲突。
-        for (chinese, english) in [("长度", "len"), ("追加", "append"), ("错误", "error")] {
-            let src = rt
-                .lookup_native(english)
-                .unwrap_or_else(|| panic!("core 组应提供 {english}"));
-            rt.register_native(Rc::new(Builtin::new(chinese, None, src.func.clone())));
-        }
+        register_builtins(&mut rt.borrow_mut());
     }
 
     /// 执行整个程序，返回最后一条语句的值。

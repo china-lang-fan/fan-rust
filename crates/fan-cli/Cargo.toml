@@ -23,3 +23,5 @@ fan-native = { workspace = true }
 fan-analysis = { workspace = true }
 fan-lsp = { workspace = true }
 fan-mod = { workspace = true }
+fan-code = { workspace = true }
+fan-vm = { workspace = true }

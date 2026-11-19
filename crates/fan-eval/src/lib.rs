@@ -14,7 +14,7 @@ pub mod operators;
 pub mod tag;
 
 pub use error::{EvalResult, FanError, Flow};
-pub use eval::Interpreter;
+pub use eval::{register_builtins, Interpreter};
 pub use module::{default_modules_dirs, module_name_from_path, Loader};
 pub use oop::{convert_to_named, convert_to_primitive_kind, value_is_type};
 

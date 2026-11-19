@@ -79,6 +79,7 @@ version = "0.8.0"
 dependencies = [
  "fan-analysis",
  "fan-ast",
+ "fan-code",
  "fan-eval",
  "fan-lexer",
  "fan-lsp",
@@ -87,6 +88,7 @@ dependencies = [
  "fan-object",
  "fan-parser",
  "fan-testrun",
+ "fan-vm",
 ]
 
 [[package]]
