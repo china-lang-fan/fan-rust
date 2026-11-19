@@ -11,5 +11,9 @@ name = "fan_vm"
 path = "src/lib.rs"
 
 [dependencies]
+fan-ast = { workspace = true }
 fan-code = { workspace = true }
 fan-object = { workspace = true }
+
+[dev-dependencies]
+fan-parser = { workspace = true }

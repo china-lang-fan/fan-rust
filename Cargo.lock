@@ -92,6 +92,9 @@ dependencies = [
 [[package]]
 name = "fan-code"
 version = "0.8.0"
+dependencies = [
+ "fan-ast",
+]
 
 [[package]]
 name = "fan-eval"
@@ -173,8 +176,10 @@ dependencies = [
 name = "fan-vm"
 version = "0.8.0"
 dependencies = [
+ "fan-ast",
  "fan-code",
  "fan-object",
+ "fan-parser",
 ]
 
 [[package]]

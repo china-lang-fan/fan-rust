@@ -11,6 +11,7 @@
 
 pub mod artifact;
 pub mod chunk;
+pub mod compiler;
 pub mod disasm;
 pub mod opcode;
 pub mod serialize;

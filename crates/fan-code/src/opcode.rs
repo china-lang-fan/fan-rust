@@ -81,6 +81,15 @@ pub enum Opcode {
     Recover = 27,
     /// 导入模块：模块路径取常量池 `[u16]`，把模块对象压栈。
     LoadModule(u16) = 28,
+    /// 二元运算：运算符文本取常量池 `[u16]`，弹出右、左操作数后压入结果。
+    ///
+    /// 运算符语义（含中文运算符与字符串/数组拼接等）由 fan-vm 集中实现，避免
+    /// 为每个运算符分配一条指令。
+    BinOp(u16) = 29,
+    /// 一元运算：运算符文本取常量池 `[u16]`，弹出操作数后压入结果。
+    UnaryOp(u16) = 30,
+    /// 栈顶为函数时零参调用，否则原样保留（对应无括号 `MaybeCall` 的运行期判定）。
+    CallIfFunc = 31,
 }
 
 impl Opcode {
@@ -94,7 +103,8 @@ impl Opcode {
             | Opcode::SetIndex
             | Opcode::Return
             | Opcode::Throw
-            | Opcode::Recover => 0,
+            | Opcode::Recover
+            | Opcode::CallIfFunc => 0,
 
             Opcode::Const(_)
             | Opcode::LoadLocal(_)
@@ -109,7 +119,9 @@ impl Opcode {
             | Opcode::BuildArray(_)
             | Opcode::BuildDict(_)
             | Opcode::BuildTuple(_)
-            | Opcode::LoadModule(_) => 2,
+            | Opcode::LoadModule(_)
+            | Opcode::BinOp(_)
+            | Opcode::UnaryOp(_) => 2,
 
             Opcode::Jump(_) | Opcode::JumpIfFalse(_) | Opcode::JumpIfTrue(_) => 4,
 
@@ -161,6 +173,9 @@ impl Opcode {
             26 => Some(Opcode::Throw),
             27 => Some(Opcode::Recover),
             28 => Some(Opcode::LoadModule(0)),
+            29 => Some(Opcode::BinOp(0)),
+            30 => Some(Opcode::UnaryOp(0)),
+            31 => Some(Opcode::CallIfFunc),
             _ => None,
         }
     }

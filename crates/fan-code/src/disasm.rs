@@ -57,6 +57,9 @@ fn decode_instruction(code: &[u8], start: usize) -> Result<(Opcode, usize), Stri
         Opcode::Throw => Opcode::Throw,
         Opcode::Recover => Opcode::Recover,
         Opcode::LoadModule(_) => Opcode::LoadModule(u16_at(0)),
+        Opcode::BinOp(_) => Opcode::BinOp(u16_at(0)),
+        Opcode::UnaryOp(_) => Opcode::UnaryOp(u16_at(0)),
+        Opcode::CallIfFunc => Opcode::CallIfFunc,
     };
     Ok((op, 1 + operand_size))
 }
@@ -108,6 +111,8 @@ fn render(op: &Opcode, chunk: &Chunk) -> String {
         Opcode::MixfixCall(i, n) => format!("MIXFIX_CALL {i} argc={n} ；{}", const_str(*i)),
         Opcode::InvokeMethod(i, n) => format!("INVOKE_METHOD {i} argc={n} ；{}", const_str(*i)),
         Opcode::LoadModule(i) => format!("LOAD_MODULE {i} ；{}", const_str(*i)),
+        Opcode::BinOp(i) => format!("BIN_OP {i} ；{}", const_str(*i)),
+        Opcode::UnaryOp(i) => format!("UNARY_OP {i} ；{}", const_str(*i)),
         other => format!("{other:?}"),
     }
 }

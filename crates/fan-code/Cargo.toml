@@ -9,3 +9,6 @@ description = "凡语言字节码契约、代码生成与产物序列化（编�
 [lib]
 name = "fan_code"
 path = "src/lib.rs"
+
+[dependencies]
+fan-ast = { workspace = true }
