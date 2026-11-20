@@ -51,6 +51,41 @@ impl VmFunctionRegistry {
         display_name: &str,
         upvalues: Vec<Upvalue>,
     ) -> Object {
+        self.register(
+            Rc::new(Closure {
+                module_id: module,
+                function_index: index,
+                upvalues,
+                receiver: None,
+            }),
+            display_name,
+        )
+    }
+
+    /// 构造绑定接收者的方法闭包（复用某字节码函数，调用时把 receiver 作为隐式首参）。
+    pub fn make_bound_method(
+        &mut self,
+        module: ModuleId,
+        index: FnIndex,
+        display_name: &str,
+        receiver: Object,
+        upvalues: Vec<Upvalue>,
+    ) -> Object {
+        self.register(
+            Rc::new(Closure {
+                module_id: module,
+                function_index: index,
+                upvalues,
+                receiver: Some(receiver),
+            }),
+            display_name,
+        )
+    }
+
+    /// 以标记用 `Object::Func` 登记一条字节码闭包并返回该可调用值。
+    fn register(&mut self, closure: Rc<Closure>, display_name: &str) -> Object {
+        let module = closure.module_id;
+        let index = closure.function_index;
         let function = Function::new(
             format!("{VM_FN_PREFIX}{module}:{index}:{display_name}"),
             Vec::<Parameter>::new(),
@@ -60,14 +95,7 @@ impl VmFunctionRegistry {
         );
         let rc = Rc::new(function);
         let key = Rc::as_ptr(&rc) as usize;
-        self.closure_by_ptr.insert(
-            key,
-            Rc::new(Closure {
-                module_id: module,
-                function_index: index,
-                upvalues,
-            }),
-        );
+        self.closure_by_ptr.insert(key, closure);
         Object::Func(rc)
     }
 

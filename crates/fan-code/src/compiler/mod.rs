@@ -14,7 +14,9 @@ use fan_ast::expr::Expr;
 use fan_ast::stmt::Stmt;
 use fan_ast::Program;
 
-use crate::chunk::{Arity, ChunkBuilder, FunctionChunk, ModuleChunk, UpvalueDesc};
+use crate::chunk::{
+    Arity, ChunkBuilder, ClassChunk, FunctionChunk, MethodChunk, ModuleChunk, UpvalueDesc,
+};
 use crate::opcode::Opcode;
 use crate::ConstValue;
 
@@ -26,10 +28,19 @@ pub type CompileResult<T> = Result<T, String>;
 /// 把一份程序（一个源文件）编译为模块块。
 pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
     let functions = Rc::new(RefCell::new(Vec::new()));
+    let classes = Rc::new(RefCell::new(Vec::new()));
+    let methods = Rc::new(RefCell::new(Vec::new()));
     let exports = Rc::new(RefCell::new(Vec::new()));
     let imports = Rc::new(RefCell::new(Vec::new()));
     let native_aliases = Rc::new(RefCell::new(HashMap::new()));
-    let mut compiler = Compiler::new(functions, exports, imports, native_aliases);
+    let mut compiler = Compiler::new(
+        functions,
+        classes,
+        methods,
+        exports,
+        imports,
+        native_aliases,
+    );
     // 函数提升：预扫描顶层函数声明，先在根作用域占槽，使前置引用（后定义的函数
     // 在更早的函数体内被调用）能解析到同一局部槽，与 tree 求值器的模块作用域对齐。
     compiler.predeclare_top_level_functions(&program.statements);
@@ -41,6 +52,12 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
     let functions = Rc::try_unwrap(compiler.functions)
         .expect("函数表无其他引用")
         .into_inner();
+    let classes = Rc::try_unwrap(compiler.classes)
+        .expect("类表无其他引用")
+        .into_inner();
+    let methods = Rc::try_unwrap(compiler.methods)
+        .expect("方法表无其他引用")
+        .into_inner();
     let exports = Rc::try_unwrap(compiler.exports)
         .expect("导出表无其他引用")
         .into_inner();
@@ -50,6 +67,8 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
     Ok(ModuleChunk {
         entry,
         functions,
+        classes,
+        methods,
         exports,
         imports,
         top_slots: compiler.scope.root_slots(),
@@ -60,6 +79,10 @@ struct Compiler<'p> {
     builder: ChunkBuilder,
     /// 模块内共享的函数表：嵌套函数按追加顺序登记，MakeClosure 以索引引用。
     functions: Rc<RefCell<Vec<FunctionChunk>>>,
+    /// 模块内共享的模型（类）表，BindClass 以索引引用。
+    classes: Rc<RefCell<Vec<ClassChunk>>>,
+    /// 模块内共享的模型方法表。
+    methods: Rc<RefCell<Vec<MethodChunk>>>,
     /// 模块导出/导入名，模块内所有函数编译器共享。
     exports: Rc<RefCell<Vec<String>>>,
     imports: Rc<RefCell<Vec<String>>>,
@@ -93,6 +116,8 @@ struct LoopCtx {
 impl<'p> Compiler<'p> {
     fn new(
         functions: Rc<RefCell<Vec<FunctionChunk>>>,
+        classes: Rc<RefCell<Vec<ClassChunk>>>,
+        methods: Rc<RefCell<Vec<MethodChunk>>>,
         exports: Rc<RefCell<Vec<String>>>,
         imports: Rc<RefCell<Vec<String>>>,
         native_aliases: Rc<RefCell<HashMap<String, String>>>,
@@ -100,6 +125,8 @@ impl<'p> Compiler<'p> {
         Compiler {
             builder: ChunkBuilder::new(),
             functions,
+            classes,
+            methods,
             exports,
             imports,
             native_aliases,
@@ -117,6 +144,8 @@ impl<'p> Compiler<'p> {
     fn child(&self) -> Compiler<'p> {
         let mut child = Compiler::new(
             Rc::clone(&self.functions),
+            Rc::clone(&self.classes),
+            Rc::clone(&self.methods),
             Rc::clone(&self.exports),
             Rc::clone(&self.imports),
             Rc::clone(&self.native_aliases),
@@ -346,6 +375,8 @@ impl<'p> Compiler<'p> {
                 }
                 Ok(())
             }
+            Stmt::Class(c) => self.compile_class(c),
+            Stmt::MethodDef(m) => self.compile_method_def(m),
             other => Err(format!(
                 "字节码编译器暂不支持的语句：{}",
                 stmt_kind_name(other)
@@ -695,6 +726,7 @@ impl<'p> Compiler<'p> {
             }
             Expr::Call(call) => self.compile_call(call),
             Expr::Through(t) => self.compile_through(t),
+            Expr::Composite(lit) => self.compile_composite(lit),
             Expr::ImplicitReceiverCall(c) => self.compile_implicit_receiver_call(c),
             Expr::MaybeCall(maybe) => {
                 self.line(maybe.pos.line as u32);
@@ -923,8 +955,146 @@ impl<'p> Compiler<'p> {
         result
     }
 
+    /// 编译 `模型 X … 结束`：登记类元数据并发出 BindClass 创建运行期类对象，
+    /// 再像普通变量一样绑定到类名局部槽，使 `X{...}` 与 `X(...)` 能按名取到类。
+    fn compile_class(&mut self, c: &fan_ast::stmt::ClassStmt) -> CompileResult<()> {
+        self.line(c.pos.line as u32);
+        if !c.tags.is_empty() {
+            return Err("字节码编译器暂不支持标签（装饰器）模型".to_string());
+        }
+        let field_names: Vec<String> = c.fields.iter().map(|f| f.name.clone()).collect();
+        let index = self.classes.borrow().len() as u16;
+        self.classes.borrow_mut().push(ClassChunk {
+            name: c.name.clone(),
+            fields: field_names,
+            embeds: c.embeds.clone(),
+        });
+        self.builder.emit(Opcode::BindClass(index));
+        // 类名作为当前作用域局部绑定（含函数提升预声明的槽位复用）。
+        let slot = self.scope.declare_or_reuse_root(&c.name);
+        self.builder.emit(Opcode::StoreLocal(slot));
+        if c.visibility == fan_ast::stmt::Visibility::Public {
+            let mut exports = self.exports.borrow_mut();
+            if !exports.contains(&c.name) {
+                exports.push(c.name.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// 编译复合字面量 `模型{字段: 值, …}`：依次压入字段名常量与字段值，再压入类对象，
+    /// 由 NewInstance 在运行期构造零值实例并按名填字段（不调用 初始化，对齐 tree）。
+    fn compile_composite(&mut self, lit: &fan_ast::expr::CompositeLit) -> CompileResult<()> {
+        self.line(lit.pos.line as u32);
+        for field in &lit.fields {
+            let name_idx = self.add_string_const(&field.name);
+            self.builder.emit(Opcode::Const(name_idx));
+            match &field.value {
+                Some(value) => self.compile_expr(value)?,
+                None => {
+                    let nil = self.builder.add_constant(ConstValue::Nil);
+                    self.builder.emit(Opcode::Const(nil));
+                }
+            }
+        }
+        self.compile_expr(&lit.model)?;
+        let class_name = match lit.model.as_ref() {
+            Expr::Ident(id) => id.name.clone(),
+            other => {
+                return Err(format!(
+                    "复合字面量暂仅支持标识符模型，实际是 {}",
+                    expr_kind_name(other)
+                ))
+            }
+        };
+        let name_idx = self.add_string_const(&class_name);
+        self.builder
+            .emit(Opcode::NewInstance(name_idx, lit.fields.len() as u8));
+        Ok(())
+    }
+
+    /// 编译 `定义 模型 的 方法 名(…)`：方法体编译为带隐式首参 `自己` 的函数字节码，
+    /// 登记到模块函数表并在方法表记录 (类名, 方法名) → 函数索引；不产生运行期栈值。
+    /// 基本类型（字符串/数组等）的方法扩展留待后续里程碑。
+    fn compile_method_def(&mut self, m: &fan_ast::stmt::MethodDef) -> CompileResult<()> {
+        self.line(m.pos.line as u32);
+        if m.primitive {
+            return Err("字节码编译器暂不支持基本类型的方法扩展".to_string());
+        }
+        let f = &m.function;
+        let mut child = self.child();
+        // 隐式接收者固定占据槽 0，显式参数顺延到槽 1..。
+        child.scope.declare_at("自己", 0);
+        let mut fixed_index: u16 = 1;
+        let has_variadic = f.params.iter().any(|p| p.variadic);
+        for param in &f.params {
+            if param.variadic {
+                let slot = f.params.len() as u16; // 自己(1 槽) + 显式参数序号
+                child.scope.declare_at(&param.name, slot);
+            } else {
+                child.scope.declare_at(&param.name, fixed_index);
+                fixed_index += 1;
+            }
+        }
+        // 显式参数的默认值序言（槽位整体后移一位以容纳 自己）。
+        for (offset, param) in f.params.iter().enumerate() {
+            if let Some(default) = &param.default {
+                let slot = (offset + 1) as u16;
+                child.line(f.pos.line as u32);
+                child.builder.emit(Opcode::ArgCount);
+                // 接收者占一个实参，故默认值判定比较的是 argc 与 offset+1。
+                let const_idx = child
+                    .builder
+                    .add_constant(ConstValue::Int((offset + 1) as i64));
+                child.builder.emit(Opcode::Const(const_idx));
+                let op = child.add_string_const("小于等于");
+                child.builder.emit(Opcode::BinOp(op));
+                child.builder.emit(Opcode::Dup);
+                let skip_default = child.builder.emit(Opcode::JumpIfFalse(0));
+                child.builder.emit(Opcode::Pop);
+                child.compile_expr(default)?;
+                child.builder.emit(Opcode::StoreLocal(slot));
+                child.builder.patch_jump(skip_default);
+                child.builder.emit(Opcode::Pop);
+            }
+        }
+        child.compile_statements(&f.body.statements)?;
+        let nil = child.builder.add_constant(ConstValue::Nil);
+        child.builder.emit(Opcode::Const(nil));
+        child.builder.emit(Opcode::Return);
+
+        let fixed = f.params.iter().filter(|p| !p.variadic).count() + 1;
+        let arity = Arity {
+            fixed,
+            variadic: has_variadic,
+            optional: f.params.iter().filter(|p| p.default.is_some()).count(),
+        };
+        let chunk = FunctionChunk {
+            name: format!("{}#{}", m.class_name, m.method_name),
+            arity,
+            params: {
+                let mut names = vec!["自己".to_string()];
+                names.extend(f.params.iter().map(|p| p.name.clone()));
+                names
+            },
+            body: child.builder.build(),
+            upvalues: child.upvalues,
+        };
+        let function_index = self.functions.borrow().len() as u16;
+        self.functions.borrow_mut().push(chunk);
+        self.methods.borrow_mut().push(MethodChunk {
+            class_name: m.class_name.clone(),
+            method_name: m.method_name.clone(),
+            function_index,
+        });
+        Ok(())
+    }
+
     fn compile_function_literal(&mut self, f: &fan_ast::expr::FunctionLit) -> CompileResult<()> {
         self.line(f.pos.line as u32);
+        if !f.tags.is_empty() {
+            return Err("字节码编译器暂不支持标签（装饰器）函数".to_string());
+        }
         // `定义 本地("spec") 函数 名(...)`：不生成字节码函数体，把凡语函数名登记为
         // Runtime 原生 spec 的别名；调用该名时改发 CallNative。与树遍历求值器的
         // bind_native 对齐：带模块前缀优先按完整 spec，否则按点号后的短名。

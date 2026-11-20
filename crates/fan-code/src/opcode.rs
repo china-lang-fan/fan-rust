@@ -116,6 +116,11 @@ pub enum Opcode {
     CallMarked = 44,
     /// 原生调用的展开版本：原生 spec 名取常量池 `[u16]`，实参个数由标记边界运行期计算。
     CallNativeMarked(u16) = 45,
+    /// 按模块类表 `[u16]` 的元数据创建模型对象（Object::Class）并压栈，随后由常规赋值绑定类名。
+    BindClass(u16) = 46,
+    /// 复合字面量实例化：类名取常量池 `[u16]`，字段对数 `[u8]`；
+    /// 栈布局自下而上为 字段名、字段值 交替，栈顶为类对象。构造零值实例后按名填字段。
+    NewInstance(u16, u8) = 47,
 }
 
 /// [`Opcode::ForStep`] 的可迭代对象类型标签。
@@ -167,7 +172,8 @@ impl Opcode {
             | Opcode::BinOp(_)
             | Opcode::UnaryOp(_)
             | Opcode::UnpackTuple(_)
-            | Opcode::CallNativeMarked(_) => 2,
+            | Opcode::CallNativeMarked(_)
+            | Opcode::BindClass(_) => 2,
 
             Opcode::Jump(_) | Opcode::JumpIfFalse(_) | Opcode::JumpIfTrue(_) => 4,
 
@@ -175,7 +181,8 @@ impl Opcode {
             Opcode::ForStep(..) => 9,
             Opcode::CallNative(_, argc)
             | Opcode::MixfixCall(_, argc)
-            | Opcode::InvokeMethod(_, argc) => {
+            | Opcode::InvokeMethod(_, argc)
+            | Opcode::NewInstance(_, argc) => {
                 let _ = argc;
                 3
             }
@@ -235,6 +242,8 @@ impl Opcode {
             43 => Some(Opcode::BuildDictMarked),
             44 => Some(Opcode::CallMarked),
             45 => Some(Opcode::CallNativeMarked(0)),
+            46 => Some(Opcode::BindClass(0)),
+            47 => Some(Opcode::NewInstance(0, 0)),
             _ => None,
         }
     }

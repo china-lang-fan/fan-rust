@@ -597,4 +597,71 @@ mod tests {
                     通过 工具 加倍(21)\n";
         assert_eq!(run_source(src).unwrap(), Object::Int(42));
     }
+
+    #[test]
+    fn 模型复合字面量实例化并按字段填充() {
+        let src = "定义 模型 坐标\n 公开 属性 整数 横向\n 公开 属性 整数 纵向\n结束\n\
+                    变量 p = 坐标{横向: 3, 纵向: 4}\np.横向\n";
+        assert_eq!(run_source(src).unwrap(), Object::Int(3));
+        let src2 = "定义 模型 坐标\n 公开 属性 整数 横向\n 公开 属性 整数 纵向\n结束\n\
+                    变量 p = 坐标{横向: 9}\np.纵向\n";
+        assert_eq!(run_source(src2).unwrap(), Object::Nil);
+    }
+
+    #[test]
+    fn 模型字段可经成员赋值修改() {
+        let src = "定义 模型 账户\n 属性 整数 余额\n结束\n\
+                    变量 a = 账户{余额: 100}\na.余额 = 250\na.余额\n";
+        assert_eq!(run_source(src).unwrap(), Object::Int(250));
+    }
+
+    #[test]
+    fn 模型嵌入字段提升与嵌套复合字面量() {
+        let src = "定义 模型 动物\n 公开 属性 字符串 名字\n结束\n\
+                    定义 模型 狗窝\n 公开 属性 字符串 地址\n 嵌入 动物\n结束\n\
+                    变量 w = 狗窝{地址: \"北京\", 动物: 动物{名字: \"旺财\"}}\n\
+                    w.动物.名字\n";
+        assert_eq!(run_source(src).unwrap(), Object::string("旺财"));
+        // 嵌入字段提升：直接经宿主访问被嵌入模型的字段。
+        let src2 = "定义 模型 动物\n 公开 属性 字符串 名字\n结束\n\
+                    定义 模型 狗窝\n 公开 属性 字符串 地址\n 嵌入 动物\n结束\n\
+                    变量 w = 狗窝{地址: \"北京\", 动物: 动物{名字: \"旺财\"}}\n\
+                    w.名字\n";
+        assert_eq!(run_source(src2).unwrap(), Object::string("旺财"));
+    }
+
+    #[test]
+    fn 模型方法访问自己并支持方法链() {
+        let src = "定义 模型 坐标\n 公开 属性 整数 横向\n 公开 属性 整数 纵向\n结束\n\
+                    定义 坐标 的 方法 和() -> 整数\n 返回 自己.横向 加 自己.纵向\n结束\n\
+                    坐标{横向: 3, 纵向: 4}.和()\n";
+        assert_eq!(run_source(src).unwrap(), Object::Int(7));
+    }
+
+    #[test]
+    fn 模型方法可修改自己的字段() {
+        let src = "定义 模型 计数器\n 属性 整数 次数\n结束\n\
+                    定义 计数器 的 方法 累加(整数 增量)\n 自己.次数 = 自己.次数 加 增量\n结束\n\
+                    变量 c = 计数器{次数: 0}\nc.累加(5)\nc.累加(7)\nc.次数\n";
+        assert_eq!(run_source(src).unwrap(), Object::Int(12));
+    }
+
+    #[test]
+    fn 类名构造触发初始化方法() {
+        let src = "定义 模型 点\n 属性 整数 横\n 属性 整数 纵\n结束\n\
+                    定义 点 的 方法 初始化(整数 横, 整数 纵)\n 自己.横 = 横\n 自己.纵 = 纵\n结束\n\
+                    变量 p = 点(3, 4)\np.横 加 p.纵\n";
+        assert_eq!(run_source(src).unwrap(), Object::Int(7));
+    }
+
+    #[test]
+    fn 嵌入模型的方法可在宿主实例上提升调用() {
+        let src = "定义 模型 基础\n 属性 字符串 编号\n结束\n\
+                    定义 基础 的 方法 初始化(字符串 编号)\n 自己.编号 = 编号\n结束\n\
+                    定义 基础 的 方法 描述() -> 字符串\n 返回 \"部件:\" 加 自己.编号\n结束\n\
+                    定义 模型 整机\n 嵌入 基础\n 属性 字符串 型号\n结束\n\
+                    定义 整机 的 方法 初始化(字符串 编号, 字符串 型号)\n 自己.编号 = 编号\n 自己.型号 = 型号\n结束\n\
+                    变量 m = 整机(\"001\", \"X1\")\nm.描述()\n";
+        assert_eq!(run_source(src).unwrap(), Object::string("部件:001"));
+    }
 }

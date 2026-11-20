@@ -5,7 +5,8 @@
 //! 魔数错误时拒绝加载，由上层回退到源码重新编译。
 
 use crate::chunk::{
-    Arity, Chunk, ConstValue, FunctionChunk, ModuleChunk, UpvalueDesc, BYTECODE_VERSION, MAGIC,
+    Arity, Chunk, ClassChunk, ConstValue, FunctionChunk, MethodChunk, ModuleChunk, UpvalueDesc,
+    BYTECODE_VERSION, MAGIC,
 };
 
 /// 序列化错误。
@@ -283,12 +284,72 @@ impl FunctionChunk {
     }
 }
 
+impl ClassChunk {
+    fn write(&self, w: &mut Writer) {
+        w.string(&self.name);
+        w.u32(self.fields.len() as u32);
+        for f in &self.fields {
+            w.string(f);
+        }
+        w.u32(self.embeds.len() as u32);
+        for e in &self.embeds {
+            w.string(e);
+        }
+    }
+
+    fn read(r: &mut Reader) -> CodeResult<ClassChunk> {
+        let name = r.string()?;
+        let field_len = r.u32()? as usize;
+        let mut fields = Vec::with_capacity(field_len);
+        for _ in 0..field_len {
+            fields.push(r.string()?);
+        }
+        let embed_len = r.u32()? as usize;
+        let mut embeds = Vec::with_capacity(embed_len);
+        for _ in 0..embed_len {
+            embeds.push(r.string()?);
+        }
+        Ok(ClassChunk {
+            name,
+            fields,
+            embeds,
+        })
+    }
+}
+
+impl MethodChunk {
+    fn write(&self, w: &mut Writer) {
+        w.string(&self.class_name);
+        w.string(&self.method_name);
+        w.u16(self.function_index);
+    }
+
+    fn read(r: &mut Reader) -> CodeResult<MethodChunk> {
+        let class_name = r.string()?;
+        let method_name = r.string()?;
+        let function_index = r.u16()?;
+        Ok(MethodChunk {
+            class_name,
+            method_name,
+            function_index,
+        })
+    }
+}
+
 impl ModuleChunk {
     fn write_body(&self, w: &mut Writer) {
         self.entry.write(w);
         w.u32(self.functions.len() as u32);
         for f in &self.functions {
             f.write(w);
+        }
+        w.u32(self.classes.len() as u32);
+        for c in &self.classes {
+            c.write(w);
+        }
+        w.u32(self.methods.len() as u32);
+        for m in &self.methods {
+            m.write(w);
         }
         w.u32(self.exports.len() as u32);
         for e in &self.exports {
@@ -312,6 +373,16 @@ impl ModuleChunk {
         for _ in 0..fn_len {
             functions.push(FunctionChunk::read(r)?);
         }
+        let class_len = r.u32()? as usize;
+        let mut classes = Vec::with_capacity(class_len);
+        for _ in 0..class_len {
+            classes.push(ClassChunk::read(r)?);
+        }
+        let method_len = r.u32()? as usize;
+        let mut methods = Vec::with_capacity(method_len);
+        for _ in 0..method_len {
+            methods.push(MethodChunk::read(r)?);
+        }
         let export_len = r.u32()? as usize;
         let mut exports = Vec::with_capacity(export_len);
         for _ in 0..export_len {
@@ -332,6 +403,8 @@ impl ModuleChunk {
         Ok(ModuleChunk {
             entry,
             functions,
+            classes,
+            methods,
             exports,
             imports,
             top_slots,

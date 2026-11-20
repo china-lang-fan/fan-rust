@@ -74,6 +74,8 @@ fn decode_instruction(code: &[u8], start: usize) -> Result<(Opcode, usize), Stri
         Opcode::BuildDictMarked => Opcode::BuildDictMarked,
         Opcode::CallMarked => Opcode::CallMarked,
         Opcode::CallNativeMarked(_) => Opcode::CallNativeMarked(u16_at(0)),
+        Opcode::BindClass(_) => Opcode::BindClass(u16_at(0)),
+        Opcode::NewInstance(_, _) => Opcode::NewInstance(u16_at(0), operand[2]),
     };
     Ok((op, 1 + operand_size))
 }
@@ -142,6 +144,8 @@ fn render(op: &Opcode, chunk: &Chunk) -> String {
         Opcode::BuildDictMarked => "BUILD_DICT_MARKED".to_string(),
         Opcode::CallMarked => "CALL_MARKED".to_string(),
         Opcode::CallNativeMarked(i) => format!("CALL_NATIVE_MARKED {i} ；{}", const_str(*i)),
+        Opcode::BindClass(i) => format!("BIND_CLASS {i}"),
+        Opcode::NewInstance(i, n) => format!("NEW_INSTANCE {i} fields={n}"),
         other => format!("{other:?}"),
     }
 }

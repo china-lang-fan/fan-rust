@@ -9,7 +9,7 @@ use crate::opcode::Opcode;
 /// 魔数：凡语言编译产物（`.fanc` / `.凡码`）的文件头标识。
 pub const MAGIC: [u8; 4] = *b"FANC";
 /// 字节码格式版本。破坏性变更时 +1，旧产物将被拒绝并回退源码重编译。
-pub const BYTECODE_VERSION: u16 = 2;
+pub const BYTECODE_VERSION: u16 = 3;
 /// 项目清单文件名，用于上溯定位项目根（与 fan-mod 的约定保持一致）。
 pub const MANIFEST_MARKER: &str = "fan.toml";
 
@@ -77,12 +77,44 @@ pub struct ModuleChunk {
     pub entry: Chunk,
     /// 模块内定义的全部函数，`MakeClosure` 以索引引用。
     pub functions: Vec<FunctionChunk>,
+    /// 模块内定义的全部模型（类），`BindClass` 以索引引用。
+    pub classes: Vec<ClassChunk>,
+    /// 模块内定义的模型方法，`BindClass` 之后由 VM 装配到字节码方法表。
+    pub methods: Vec<MethodChunk>,
     /// 导出的顶层绑定名。
     pub exports: Vec<String>,
     /// 静态记录的导入模块路径（实际加载策略由运行时决定）。
     pub imports: Vec<String>,
     /// 模块入口顶层「名字 → 入口局部槽位」映射，供装配层执行入口后回收导出值。
     pub top_slots: Vec<(String, u16)>,
+}
+
+/// 模型（类）编译后的静态元数据。
+///
+/// 阶段一仅记录字段名（含嵌入模型字段留待后续里程碑），运行期由 VM 据此构造
+/// `fan_object::Class` 与零值实例；方法表在方法定义里程碑补充。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ClassChunk {
+    /// 模型名，用于报错与运行期类对象标识。
+    pub name: String,
+    /// 自身声明的字段名，按声明顺序；实例化时先据此置零值。
+    pub fields: Vec<String>,
+    /// 嵌入模型名，按声明顺序；BindClass 时由 VM 解析为对应类对象。
+    pub embeds: Vec<String>,
+}
+
+/// 模型方法编译产物：方法体作为普通函数进入模块函数表，这里记录定位信息。
+///
+/// 方法的隐式接收者 `自己` 由编译器在参数表前置一个槽位，VM 调用绑定方法时
+/// 把接收者作为首参注入。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MethodChunk {
+    /// 所属模型名。
+    pub class_name: String,
+    /// 方法名。
+    pub method_name: String,
+    /// 方法体在模块 `functions` 表中的索引。
+    pub function_index: u16,
 }
 
 impl Chunk {
@@ -133,14 +165,16 @@ impl ChunkBuilder {
             | Opcode::BinOp(v)
             | Opcode::UnaryOp(v)
             | Opcode::UnpackTuple(v)
-            | Opcode::CallNativeMarked(v) => self.chunk.code.extend_from_slice(&v.to_le_bytes()),
+            | Opcode::CallNativeMarked(v)
+            | Opcode::BindClass(v) => self.chunk.code.extend_from_slice(&v.to_le_bytes()),
             Opcode::Jump(v) | Opcode::JumpIfFalse(v) | Opcode::JumpIfTrue(v) => {
                 self.chunk.code.extend_from_slice(&v.to_le_bytes())
             }
             Opcode::Call(argc) => self.chunk.code.push(*argc),
             Opcode::CallNative(idx, argc)
             | Opcode::MixfixCall(idx, argc)
-            | Opcode::InvokeMethod(idx, argc) => {
+            | Opcode::InvokeMethod(idx, argc)
+            | Opcode::NewInstance(idx, argc) => {
                 self.chunk.code.extend_from_slice(&idx.to_le_bytes());
                 self.chunk.code.push(*argc);
             }

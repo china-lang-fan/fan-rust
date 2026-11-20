@@ -41,6 +41,10 @@ pub struct Vm<'m> {
     globals: HashMap<String, Object>,
     /// 跨模块共享的字节码闭包登记表。
     functions: SharedRegistry,
+    /// 已创建的模型对象，按类名登记，供 BindClass 解析嵌入模型与构造期查找。
+    class_registry: HashMap<String, Rc<fan_object::Class>>,
+    /// 字节码方法表：(类名, 方法名) → (所属模块, 函数表索引)，GetMember 命中时构造绑定闭包。
+    method_registry: HashMap<(String, String), (ModuleId, u16)>,
     /// 模块加载器；遇到 LoadModule 时按路径解析。未注入则导入语句报错。
     loader: Option<Box<dyn ModuleLoader>>,
     /// 主模块借用的生命周期标记（兼容既有 `Vm::new(&module, ..)` 签名）。
@@ -61,6 +65,8 @@ impl<'m> Vm<'m> {
             slots: Vec::new(),
             globals: HashMap::new(),
             functions: VmFunctionRegistry::shared(),
+            class_registry: HashMap::new(),
+            method_registry: HashMap::new(),
             loader: None,
             _marker: std::marker::PhantomData,
         }
@@ -476,6 +482,100 @@ impl<'m> Vm<'m> {
                     let argc = self.take_marked_count()?;
                     self.call_native(&name, argc)?;
                 }
+                Opcode::BindClass(_) => {
+                    let idx = self.read_u16(&chunk)? as usize;
+                    let frame_module = self
+                        .frames
+                        .last()
+                        .map(|f| f.module_id)
+                        .unwrap_or(MAIN_MODULE);
+                    let module = self.module_chunk(frame_module)?;
+                    let class_chunk = module
+                        .classes
+                        .get(idx)
+                        .ok_or_else(|| VmError::new(format!("类表索引 {idx} 越界")))?;
+                    let mut class = fan_object::Class::new(class_chunk.name.clone());
+                    // 用字段声明构造零值字段元数据（类型信息不参与运行期，复用 any）。
+                    for field_name in &class_chunk.fields {
+                        class.fields.push(fan_ast::FieldDecl {
+                            pos: fan_ast::Position::default(),
+                            name: field_name.clone(),
+                            type_: fan_ast::DeclType::any(),
+                            visibility: fan_ast::Visibility::File,
+                        });
+                    }
+                    // 解析嵌入模型：嵌入类必须已在同模块更早定义并登记。
+                    for embed_name in &class_chunk.embeds {
+                        let embed_class =
+                            self.class_registry
+                                .get(embed_name)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    VmError::new(format!(
+                                        "模型 {} 嵌入的模型 {} 未定义",
+                                        class_chunk.name, embed_name
+                                    ))
+                                })?;
+                        class.embeds.push(embed_class);
+                    }
+                    let class_rc = Rc::new(class);
+                    self.class_registry
+                        .insert(class_chunk.name.clone(), Rc::clone(&class_rc));
+                    // 登记本模块中属于该模型的字节码方法，供 GetMember 构造绑定闭包。
+                    for method in &module.methods {
+                        if method.class_name == class_chunk.name {
+                            self.method_registry.insert(
+                                (method.class_name.clone(), method.method_name.clone()),
+                                (frame_module, method.function_index),
+                            );
+                        }
+                    }
+                    self.stack.push(Object::Class(class_rc));
+                }
+                Opcode::NewInstance(_, _) => {
+                    let name_idx = self.read_u16(&chunk)? as usize;
+                    let pair_count = self.read_u8(&chunk)? as usize;
+                    let class_name = self.string_const(&chunk, name_idx)?;
+                    let class_obj = self.pop_operand()?;
+                    let Object::Class(class) = class_obj else {
+                        return Err(VmError::new(format!(
+                            "复合字面量目标不是模型，实际是 {}",
+                            class_obj.kind()
+                        )));
+                    };
+                    if class.name != class_name {
+                        return Err(VmError::new(format!(
+                            "复合字面量模型不匹配：期望 {class_name}，实际 {}",
+                            class.name
+                        )));
+                    }
+                    // 栈上自下而上为 字段名、字段值 交替，先整体弹出再恢复顺序。
+                    let mut raw = self.pop_args(pair_count * 2)?;
+                    let mut provided: HashMap<String, Object> = HashMap::new();
+                    let mut i = 0;
+                    while i < raw.len() {
+                        let value = raw[i + 1].clone();
+                        let name = match &raw[i] {
+                            Object::Str(s) => s.to_string(),
+                            other => {
+                                return Err(VmError::new(format!(
+                                    "复合字面量字段名必须是字符串，实际是 {}",
+                                    other.kind()
+                                )))
+                            }
+                        };
+                        provided.insert(name, value);
+                        i += 2;
+                    }
+                    let inst = self.new_zero_instance(&class)?;
+                    // 按复合字面量给出的字段名写入：自身字段直接写，嵌入字段经
+                    // set_field_value 沿嵌入链提升解析，嵌入实例则整体替换。
+                    for (name, value) in provided.drain() {
+                        inst.set_field_value(&name, value).map_err(VmError::new)?;
+                    }
+                    let _ = raw.drain(..);
+                    self.stack.push(Object::Instance(inst));
+                }
                 Opcode::LoadModule(_) => {
                     let idx = self.read_u16(&chunk)? as usize;
                     let path = self.string_const(&chunk, idx)?;
@@ -553,14 +653,68 @@ impl<'m> Vm<'m> {
             let module_id = closure.module_id;
             let index = closure.function_index;
             let upvalues = closure.upvalues.clone();
+            // 绑定方法：接收者作为隐式首参 `自己`，置于显式实参之前。
+            let args = match &closure.receiver {
+                Some(receiver) => {
+                    let mut full = Vec::with_capacity(args.len() + 1);
+                    full.push(receiver.clone());
+                    full.extend(args);
+                    full
+                }
+                None => args,
+            };
             drop(closure);
             self.invoke_bytecode_function(module_id, index, upvalues, args)?;
             return Ok(());
         }
         match callee {
+            Object::Class(class) => self.construct_instance(&class, args),
             Object::Builtin(builtin) => self.invoke_builtin(&builtin, args),
             other => Err(VmError::new(format!("值不可调用：{}", other.kind()))),
         }
+    }
+
+    /// `类名(实参…)` 构造：先建零值实例，若模型定义了 `初始化` 方法则绑定接收者后调用。
+    fn construct_instance(
+        &mut self,
+        class: &Rc<fan_object::Class>,
+        args: Vec<Object>,
+    ) -> VmResult<()> {
+        let inst = self.new_zero_instance(class)?;
+        if let Some((module_id, fn_index)) = self
+            .method_registry
+            .get(&(class.name.clone(), "初始化".to_string()))
+        {
+            let (module_id, fn_index) = (*module_id, *fn_index);
+            let bound = self.functions.borrow_mut().make_bound_method(
+                module_id,
+                fn_index,
+                "初始化",
+                Object::Instance(Rc::clone(&inst)),
+                Vec::new(),
+            );
+            // 绑定方法调用：接收者已内置，这里只传显式实参。
+            let closure = self
+                .functions
+                .borrow()
+                .lookup(&bound)
+                .expect("刚登记的构造绑定闭包可查");
+            let upvalues = closure.upvalues.clone();
+            drop(closure);
+            self.invoke_bytecode_function(module_id, fn_index, upvalues, {
+                let mut full = Vec::with_capacity(args.len() + 1);
+                full.push(Object::Instance(Rc::clone(&inst)));
+                full.extend(args);
+                full
+            })?;
+        } else if !args.is_empty() {
+            return Err(VmError::new(format!(
+                "模型 {} 没有 初始化 方法，不应传参",
+                class.name
+            )));
+        }
+        self.stack.push(Object::Instance(inst));
+        Ok(())
     }
 
     fn call_native(&mut self, name: &str, argc: usize) -> VmResult<()> {
@@ -801,6 +955,39 @@ impl<'m> Vm<'m> {
     /// 成员读取：字典按键（键优先）、实例按自身字段。
     ///
     /// M3 仅覆盖数据成员；方法分派、嵌入提升与命名类型方法在后续里程碑接入。
+    /// 构造模型的零值实例：自身字段置空，并为嵌入模型递归建立子实例（嵌入里程碑启用）。
+    fn new_zero_instance(
+        &self,
+        class: &Rc<fan_object::Class>,
+    ) -> VmResult<Rc<fan_object::Instance>> {
+        let inst = Rc::new(fan_object::Instance::new(class.clone()));
+        for field in &class.fields {
+            inst.set(field.name.clone(), Object::Nil);
+        }
+        for embed in &class.embeds {
+            let child = self.new_zero_instance(embed)?;
+            inst.embeds.borrow_mut().push(child);
+        }
+        Ok(inst)
+    }
+
+    /// 沿模型自身与嵌入链查找字节码方法，返回 (模块, 函数索引)。
+    /// 与字段提升一致：自身优先，再按嵌入声明顺序深度遍历；命中第一个即返回。
+    fn resolve_method(&self, class: &Rc<fan_object::Class>, name: &str) -> Option<(ModuleId, u16)> {
+        if let Some(entry) = self
+            .method_registry
+            .get(&(class.name.clone(), name.to_string()))
+        {
+            return Some(*entry);
+        }
+        for embed in &class.embeds {
+            if let Some(entry) = self.resolve_method(embed, name) {
+                return Some(entry);
+            }
+        }
+        None
+    }
+
     fn get_member(&self, object: &Object, name: &str) -> VmResult<Object> {
         match object.unwrap_named() {
             Object::Module(module) => module.borrow().exports.get(name).cloned().ok_or_else(|| {
@@ -812,10 +999,37 @@ impl<'m> Vm<'m> {
                 }
                 Err(VmError::new(format!("字典不存在键 {name}")))
             }
-            Object::Instance(inst) => match inst.get(name) {
-                Some(v) => Ok(v),
-                None => Err(VmError::new(format!("{} 没有字段 {name}", inst.class.name))),
-            },
+            Object::Instance(inst) => {
+                // 嵌入子实例优先（如 w.动物），再做沿嵌入链的字段提升查找。
+                if let Some(embed) = inst.embed_by_name(name) {
+                    return Ok(Object::Instance(embed));
+                }
+                let resolution = inst.resolve_field(name, &inst);
+                if resolution.ambiguous {
+                    return Err(VmError::new(format!(
+                        "{} 的字段 {name} 在嵌入链中有歧义",
+                        inst.class.name
+                    )));
+                }
+                if let Some(v) = resolution.value {
+                    return Ok(v);
+                }
+                // 字段未命中，尝试字节码方法：先查自身模型，再沿嵌入链提升查找。
+                if let Some((module_id, fn_index)) = self.resolve_method(&inst.class, name) {
+                    let bound = self.functions.borrow_mut().make_bound_method(
+                        module_id,
+                        fn_index,
+                        name,
+                        object.clone(),
+                        Vec::new(),
+                    );
+                    return Ok(bound);
+                }
+                Err(VmError::new(format!(
+                    "{} 没有字段或方法 {name}",
+                    inst.class.name
+                )))
+            }
             other => Err(VmError::new(format!("{} 不支持成员访问", other.kind()))),
         }
     }
@@ -831,10 +1045,7 @@ impl<'m> Vm<'m> {
                 dict.set(Object::string(name), value);
                 Ok(())
             }
-            Object::Instance(inst) => {
-                inst.set(name, value);
-                Ok(())
-            }
+            Object::Instance(inst) => inst.set_field_value(name, value).map_err(VmError::new),
             other => Err(VmError::new(format!("{} 不支持字段赋值", other.kind()))),
         }
     }

@@ -719,11 +719,8 @@ mod tests {
     #[test]
     fn vm遇到仍不支持的语法返回明确错误() {
         // 接口定义尚未在字节码编译器支持，应给“暂不支持”错误而非 panic。
-        let err = run_engine_captured(
-            "接口 说话者\n 方法 说话() -> 字符串\n结束\n",
-            Engine::Vm,
-        )
-        .unwrap_err();
+        let err = run_engine_captured("接口 说话者\n 方法 说话() -> 字符串\n结束\n", Engine::Vm)
+            .unwrap_err();
         assert!(err.contains("暂不支持"), "实际：{err}");
     }
 

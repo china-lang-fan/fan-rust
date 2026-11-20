@@ -30,4 +30,6 @@ pub struct Closure {
     pub function_index: u16,
     /// 顺序与该函数 `FunctionChunk.upvalues` 描述一致。
     pub upvalues: Vec<Upvalue>,
+    /// 绑定的接收者（方法闭包）：调用时作为隐式首参 `自己` 传入；普通函数为 None。
+    pub receiver: Option<Object>,
 }
