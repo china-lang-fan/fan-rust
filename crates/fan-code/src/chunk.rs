@@ -153,7 +153,8 @@ impl ChunkBuilder {
             | Opcode::Recover
             | Opcode::CallIfFunc
             | Opcode::ArgCount
-            | Opcode::GetSlice => {}
+            | Opcode::GetSlice
+            | Opcode::ToStr => {}
             Opcode::ForStep(tag, iterable, counter, elem, index_slot) => {
                 self.chunk.code.push(*tag);
                 self.chunk.code.extend_from_slice(&iterable.to_le_bytes());

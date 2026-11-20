@@ -42,8 +42,59 @@ pub fn apply_binary(op: &str, left: Object, right: Object) -> VmResult<Object> {
         }
         "且" | "&&" => Ok(if is_truthy(&left) { right } else { left }),
         "或" | "||" => Ok(if is_truthy(&left) { left } else { right }),
+        "位与" | "&" | "位或" | "|" | "异或" | "^" | "左移" | "<<" | "右移" | ">>" => {
+            bitwise(op, left, right)
+        }
         other => Err(VmError::new(format!("VM 暂不支持二元运算符：{other}"))),
     }
+}
+
+/// 位运算：仅支持整数族（整数/字节/命名整数），语义对齐树遍历求值器。
+///
+/// 右移采用 `wrapping_shr`，对有符号 i64 即算术右移（保留符号位），
+/// 与 Go 的 `>>` 及 fan-eval 一致；移位量为负报错、超过 63 结果为 0。
+fn bitwise(op: &str, left: Object, right: Object) -> VmResult<Object> {
+    let lv = integer(&left).ok_or_else(|| {
+        VmError::new(format!(
+            "{op}仅支持整数家族（整数/字节），实际 {} 与 {}",
+            left.kind(),
+            right.kind()
+        ))
+    })?;
+    let rv = integer(&right).ok_or_else(|| {
+        VmError::new(format!(
+            "{op}仅支持整数家族（整数/字节），实际 {} 与 {}",
+            left.kind(),
+            right.kind()
+        ))
+    })?;
+    let result = match op {
+        "位与" | "&" => lv & rv,
+        "位或" | "|" => lv | rv,
+        "异或" | "^" => lv ^ rv,
+        "左移" | "<<" => {
+            if rv < 0 {
+                return Err(VmError::new("左移位数不能为负"));
+            }
+            if rv > 63 {
+                0
+            } else {
+                lv.wrapping_shl(rv as u32)
+            }
+        }
+        "右移" | ">>" => {
+            if rv < 0 {
+                return Err(VmError::new("右移位数不能为负"));
+            }
+            if rv > 63 {
+                0
+            } else {
+                lv.wrapping_shr(rv as u32)
+            }
+        }
+        _ => unreachable!("位运算分支已限定"),
+    };
+    Ok(Object::Int(result))
 }
 
 pub fn apply_unary(op: &str, operand: Object) -> VmResult<Object> {
@@ -56,6 +107,13 @@ pub fn apply_unary(op: &str, operand: Object) -> VmResult<Object> {
             },
         },
         "!" | "非" => Ok(Object::Bool(!is_truthy(&operand))),
+        "位取反" | "~" => match integer(&operand) {
+            Some(i) => Ok(Object::Int(!i)),
+            None => Err(VmError::new(format!(
+                "位取反仅支持整数家族，实际是 {}",
+                operand.kind()
+            ))),
+        },
         other => Err(VmError::new(format!("VM 暂不支持一元运算符：{other}"))),
     }
 }
@@ -179,5 +237,40 @@ mod tests {
     fn 除零与非数值报错() {
         assert!(apply_binary("/", Object::int(1), Object::int(0)).is_err());
         assert!(apply_unary("负", Object::string("x")).is_err());
+    }
+
+    #[test]
+    fn 位运算与算术右移() {
+        assert_eq!(
+            apply_binary("位与", Object::int(0b1100), Object::int(0b1010)).unwrap(),
+            Object::Int(0b1000)
+        );
+        assert_eq!(
+            apply_binary("位或", Object::int(0b1100), Object::int(0b1010)).unwrap(),
+            Object::Int(0b1110)
+        );
+        assert_eq!(
+            apply_binary("异或", Object::int(0b1100), Object::int(0b1010)).unwrap(),
+            Object::Int(0b0110)
+        );
+        assert_eq!(
+            apply_binary("左移", Object::int(1), Object::int(3)).unwrap(),
+            Object::Int(8)
+        );
+        assert_eq!(
+            apply_binary("右移", Object::int(8), Object::int(2)).unwrap(),
+            Object::Int(2)
+        );
+        // 负数右移保留符号位（算术右移）。
+        assert_eq!(
+            apply_binary("右移", Object::int(-8), Object::int(1)).unwrap(),
+            Object::Int(-4)
+        );
+        assert_eq!(
+            apply_unary("位取反", Object::int(0)).unwrap(),
+            Object::Int(-1)
+        );
+        assert!(apply_binary("左移", Object::int(1), Object::int(-1)).is_err());
+        assert!(apply_binary("位与", Object::int(1), Object::string("x")).is_err());
     }
 }

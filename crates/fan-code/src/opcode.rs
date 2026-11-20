@@ -100,12 +100,16 @@ pub enum Opcode {
     ForStep(u8, u16, u16, u16, u16) = 36,
     /// 切片：依次弹出 high、low（任一侧为空值表示省略）、target，压入切片结果。
     GetSlice = 37,
+    /// 弹出栈顶值，按 inspect 文本规则转为字符串压栈（插值字符串用）。
+    ToStr = 38,
 }
 
 /// [`Opcode::ForStep`] 的可迭代对象类型标签。
 pub const FOR_TAG_ARRAY: u8 = 0;
 pub const FOR_TAG_STRING: u8 = 1;
 pub const FOR_TAG_DICT: u8 = 2;
+/// 动态标签：编译期无法确定类型（函数调用返回值等复杂表达式），运行期按实际类型分派。
+pub const FOR_TAG_DYNAMIC: u8 = 3;
 /// [`Opcode::ForStep`] 序号/键槽的哨兵：表示该遍历没有第二个迭代变量。
 pub const FOR_NO_INDEX_SLOT: u16 = u16::MAX;
 
@@ -123,7 +127,8 @@ impl Opcode {
             | Opcode::Recover
             | Opcode::CallIfFunc
             | Opcode::ArgCount
-            | Opcode::GetSlice => 0,
+            | Opcode::GetSlice
+            | Opcode::ToStr => 0,
 
             Opcode::Const(_)
             | Opcode::LoadLocal(_)
@@ -201,6 +206,7 @@ impl Opcode {
             33 => Some(Opcode::ArgCount),
             36 => Some(Opcode::ForStep(0, 0, 0, 0, 0)),
             37 => Some(Opcode::GetSlice),
+            38 => Some(Opcode::ToStr),
             _ => None,
         }
     }

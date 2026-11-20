@@ -66,6 +66,7 @@ fn decode_instruction(code: &[u8], start: usize) -> Result<(Opcode, usize), Stri
             Opcode::ForStep(operand[0], u16_at(1), u16_at(3), u16_at(5), u16_at(7))
         }
         Opcode::GetSlice => Opcode::GetSlice,
+        Opcode::ToStr => Opcode::ToStr,
     };
     Ok((op, 1 + operand_size))
 }
@@ -126,6 +127,7 @@ fn render(op: &Opcode, chunk: &Chunk) -> String {
             "FOR_STEP tag={tag} iter_slot={iterable} counter_slot={counter} elem_slot={elem} idx_slot={index_slot}"
         ),
         Opcode::GetSlice => "GET_SLICE".to_string(),
+        Opcode::ToStr => "TO_STR".to_string(),
         other => format!("{other:?}"),
     }
 }

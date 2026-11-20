@@ -391,6 +391,10 @@ impl<'m> Vm<'m> {
                     let result = self.get_slice(&target, &low, &high)?;
                     self.stack.push(result);
                 }
+                Opcode::ToStr => {
+                    let value = self.pop_operand()?;
+                    self.stack.push(Object::string(value.inspect()));
+                }
                 Opcode::LoadModule(_) => {
                     let idx = self.read_u16(&chunk)? as usize;
                     let path = self.string_const(&chunk, idx)?;
@@ -809,6 +813,22 @@ impl<'m> Vm<'m> {
     ) -> VmResult<()> {
         let base = self.frames.last().expect("帧存在").slot_base;
         let iterable = self.slot(base, iter_slot);
+        // 动态标签：编译期未知类型，按运行期实际对象解析为具体标签。
+        let tag = if tag == fan_code::opcode::FOR_TAG_DYNAMIC {
+            match iterable {
+                Object::Array(_) => fan_code::opcode::FOR_TAG_ARRAY,
+                Object::Str(_) => fan_code::opcode::FOR_TAG_STRING,
+                Object::Dict(_) => fan_code::opcode::FOR_TAG_DICT,
+                _ => {
+                    return Err(VmError::new(format!(
+                        "对象不可遍历，实际类型是 {}",
+                        iterable.kind()
+                    )))
+                }
+            }
+        } else {
+            tag
+        };
         let counter = self.slot(base, counter_slot).as_int().unwrap_or(0);
         let has_more = match tag {
             fan_code::opcode::FOR_TAG_ARRAY => {

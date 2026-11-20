@@ -194,6 +194,7 @@ impl<'p> Compiler<'p> {
                 self.compile_expr(&a.value)?;
                 self.emit_store_name(&a.name)
             }
+            Stmt::CompoundAssign(c) => self.compile_compound_assign(c),
             Stmt::MultiDecl(d) => {
                 self.line(d.pos.line as u32);
                 // 无初值多变量声明（`变量 甲、乙`）解析为空元组：为每个名字压入空值，
@@ -237,6 +238,7 @@ impl<'p> Compiler<'p> {
             }
             Stmt::Block(b) => self.compile_block(&b.statements),
             Stmt::If(if_stmt) => self.compile_if(if_stmt),
+            Stmt::Switch(s) => self.compile_switch(s),
             Stmt::While(w) => self.compile_while(w),
             Stmt::Repeat(r) => self.compile_repeat(r),
             Stmt::Times(t) => self.compile_times(t),
@@ -357,6 +359,66 @@ impl<'p> Compiler<'p> {
         Ok(())
     }
 
+    /// 把 `判断` 降级为线性分支链，语义对齐 tree eval_switch：
+    /// 守卫分支按顺序求值布尔条件；值匹配分支拿 subject 与候选值逐个「等于」比较，
+    /// 命中即执行分支体并跳过其余分支；`其他` 作为默认分支放最后；无命中且无默认时落空。
+    fn compile_switch(&mut self, s: &fan_ast::stmt::SwitchStmt) -> CompileResult<()> {
+        self.line(s.pos.line as u32);
+        // subject 只求值一次，存入编译器生成的局部槽（独立作用域，名字对用户不可见）。
+        let subject_name = format!("$判断目标@{:x}", self.builder.code_len());
+        self.scope.push();
+        if let Some(subject) = &s.subject {
+            let slot = self.scope.declare(&subject_name);
+            self.compile_expr(subject)?;
+            self.builder.emit(Opcode::StoreLocal(slot));
+        }
+        let has_default = s.branches.iter().any(|b| b.default);
+        let mut end_jumps = Vec::new();
+        for branch in &s.branches {
+            if branch.default {
+                continue;
+            }
+            if branch.guard {
+                self.compile_expr(&branch.values[0])?;
+            } else {
+                if s.subject.is_none() {
+                    return Err("判断 值匹配分支缺少匹配对象".to_string());
+                }
+                let eq_op = self.add_string_const("等于");
+                let mut short_circuit = Vec::new();
+                for (i, candidate) in branch.values.iter().enumerate() {
+                    if i > 0 {
+                        // 前一个比较为假时弹出假值，继续算下一个候选；为真则跳过后续比较。
+                        short_circuit.push(self.builder.emit(Opcode::JumpIfTrue(0)));
+                        self.builder.emit(Opcode::Pop);
+                    }
+                    self.emit_load_name(&subject_name)?;
+                    self.compile_expr(candidate)?;
+                    self.builder.emit(Opcode::BinOp(eq_op));
+                }
+                // 短路真跳转全部落到栈顶这个最终布尔上。
+                for j in short_circuit {
+                    self.builder.patch_jump(j);
+                }
+            }
+            let skip_body = self.builder.emit(Opcode::JumpIfFalse(0));
+            self.builder.emit(Opcode::Pop);
+            self.compile_block(&branch.body.statements)?;
+            end_jumps.push(self.builder.emit(Opcode::Jump(0)));
+            self.builder.patch_jump(skip_body);
+            self.builder.emit(Opcode::Pop);
+        }
+        if has_default {
+            let default = s.branches.iter().find(|b| b.default).unwrap();
+            self.compile_block(&default.body.statements)?;
+        }
+        for j in end_jumps {
+            self.builder.patch_jump(j);
+        }
+        self.scope.pop();
+        Ok(())
+    }
+
     fn compile_while(&mut self, w: &fan_ast::stmt::WhileStmt) -> CompileResult<()> {
         self.line(w.pos.line as u32);
         let loop_start = self.builder.code_len();
@@ -459,16 +521,13 @@ impl<'p> Compiler<'p> {
     fn compile_foreach(&mut self, f: &fan_ast::stmt::ForEachStmt) -> CompileResult<()> {
         self.line(f.pos.line as u32);
         use fan_ast::expr::Expr as E;
-        // 仅支持数组、字符串、字典三类可迭代字面表达式；复杂表达式先求值入槽。
+        // 数组、字符串、字典字面量在编译期即可确定标签；其余复杂表达式
+        // （函数调用、成员取值等）用动态标签，由 VM 运行期按实际类型分派。
         let tag = match &f.iterable {
             E::Array(_) => crate::opcode::FOR_TAG_ARRAY,
             E::Str(_) | E::Char(_) => crate::opcode::FOR_TAG_STRING,
             E::Dict(_) => crate::opcode::FOR_TAG_DICT,
-            _ => {
-                return Err(
-                    "字节码编译器暂不支持对复杂表达式直接遍历（请先存入变量再遍历）".to_string(),
-                )
-            }
+            _ => crate::opcode::FOR_TAG_DYNAMIC,
         };
 
         // 求值可迭代对象并保存到隐藏槽。
@@ -548,6 +607,7 @@ impl<'p> Compiler<'p> {
                 self.builder.emit(Opcode::Const(c));
                 Ok(())
             }
+            Expr::InterpStr(interp) => self.compile_interp_string(interp),
             Expr::Char(c) => {
                 let k = self.builder.add_constant(ConstValue::Char(c.value));
                 self.line(c.pos.line as u32);
@@ -569,6 +629,11 @@ impl<'p> Compiler<'p> {
             Expr::Ident(id) => {
                 self.line(id.pos.line as u32);
                 self.emit_load_name(&id.name)
+            }
+            Expr::Update(u) => {
+                self.line(u.pos.line as u32);
+                self.compile_update(u)?;
+                Ok(())
             }
             Expr::Unary(u) => {
                 self.line(u.pos.line as u32);
@@ -821,6 +886,87 @@ impl<'p> Compiler<'p> {
             self.builder.emit(Opcode::StoreLocal(slot));
             // 绑定后再把函数值留在栈上，保持“声明表达式有值”的直觉（非必需）。
             self.builder.emit(Opcode::LoadLocal(slot));
+        }
+        Ok(())
+    }
+
+    /// 编译复合赋值 `甲 += 乙`：读取当前值与右侧表达式做二元运算后写回，
+    /// 运算符与 tree eval_compound_assign 对齐（加/减/乘/除）。当前仅支持标识符目标。
+    fn compile_compound_assign(
+        &mut self,
+        c: &fan_ast::stmt::CompoundAssignStmt,
+    ) -> CompileResult<()> {
+        self.line(c.pos.line as u32);
+        let fan_ast::expr::Expr::Ident(id) = &c.target else {
+            return Err("字节码编译器暂不支持对非标识符复合赋值".to_string());
+        };
+        match c.op.as_str() {
+            "加" | "减" | "乘" | "除" => {}
+            other => return Err(format!("未知复合赋值运算符：{other}")),
+        }
+        self.emit_load_name(&id.name)?;
+        self.compile_expr(&c.value)?;
+        let op_idx = self.add_string_const(&c.op);
+        self.builder.emit(Opcode::BinOp(op_idx));
+        self.emit_store_name(&id.name)
+    }
+
+    /// 编译插值字符串：parts 与 exprs 交错，表达式经 ToStr 文本化后用字符串拼接累积。
+    fn compile_interp_string(&mut self, interp: &fan_ast::expr::InterpString) -> CompileResult<()> {
+        let add_op = self.add_string_const("加");
+        let mut emitted = false;
+        for (i, part) in interp.parts.iter().enumerate() {
+            if !part.is_empty() {
+                let c = self.add_string_const(part);
+                self.builder.emit(Opcode::Const(c));
+                if emitted {
+                    self.builder.emit(Opcode::BinOp(add_op));
+                }
+                emitted = true;
+            }
+            if let Some(e) = interp.exprs.get(i) {
+                self.compile_expr(e)?;
+                self.builder.emit(Opcode::ToStr);
+                if emitted {
+                    self.builder.emit(Opcode::BinOp(add_op));
+                }
+                emitted = true;
+            }
+        }
+        // 全空（理论上不会出现）时兜底为空字符串，避免栈上无值。
+        if !emitted {
+            let empty = self.add_string_const("");
+            self.builder.emit(Opcode::Const(empty));
+        }
+        Ok(())
+    }
+
+    /// 编译自增自减（`甲++`/`甲--` 及前缀形式），仅支持标识符目标。
+    ///
+    /// 栈效果：读取当前值（Dup 保留一份作为表达式结果），加/减 1 后写回目标；
+    /// 后缀返回旧值，前缀返回新值，与树遍历求值器 eval_update 对齐。
+    fn compile_update(&mut self, u: &fan_ast::expr::UpdateExpr) -> CompileResult<()> {
+        let fan_ast::expr::Expr::Ident(id) = &*u.target else {
+            return Err("字节码编译器暂不支持对非标识符自增自减".to_string());
+        };
+        let delta = match u.op.as_str() {
+            "加" => 1i64,
+            "减" => -1,
+            other => return Err(format!("未知自增运算符：{other}")),
+        };
+        // 前缀结果是新值，后缀结果是旧值；两者都需要先取当前值并写回新值。
+        self.emit_load_name(&id.name)?; // 栈：当前值
+        self.builder.emit(Opcode::Dup); // 栈：当前值、当前值
+        let one = self.builder.add_constant(ConstValue::Int(1));
+        self.builder.emit(Opcode::Const(one)); // 栈：当前值、当前值、1
+        let bin_op = if delta > 0 { "加" } else { "减" };
+        let op_idx = self.add_string_const(bin_op);
+        self.builder.emit(Opcode::BinOp(op_idx)); // 栈：当前值、新值
+        self.emit_store_name(&id.name)?; // 栈：当前值（写回弹出新值）
+        if u.prefix {
+            // 前缀：结果应为新值。当前栈顶是旧值，改为重新读取写回后的目标。
+            self.builder.emit(Opcode::Pop);
+            self.emit_load_name(&id.name)?;
         }
         Ok(())
     }

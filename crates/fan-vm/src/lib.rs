@@ -391,7 +391,137 @@ mod tests {
     #[test]
     fn 闭包读取外层变量不修改时仍可访问() {
         let src = "函数 配()\n  变量 前缀 = 100\n  函数 取(整数 偏移)\n    返回 前缀 加 偏移\n  结束\n  返回 取\n结束\n\
-                   变量 取 = 配()\n取(23)";
+                    变量 取 = 配()\n取(23)";
         assert_eq!(run_source(src).unwrap(), Object::Int(123));
+    }
+
+    #[test]
+    fn 后缀自增自减返回旧值并写回() {
+        // 后缀：表达式结果是旧值，变量写回新值。
+        let src = "变量 次数 = 5\n变量 旧 = 次数++\n旧";
+        assert_eq!(run_source(src).unwrap(), Object::Int(5));
+        let src2 = "变量 次数 = 5\n变量 旧 = 次数++\n次数";
+        assert_eq!(run_source(src2).unwrap(), Object::Int(6));
+        let src3 = "变量 次数 = 5\n次数--\n次数";
+        assert_eq!(run_source(src3).unwrap(), Object::Int(4));
+    }
+
+    #[test]
+    fn 自增在循环中累加() {
+        let src = "变量 和 = 0\n变量 i = 0\n当 i 小于 3 循环\n  i++\n  和 = 和 加 i\n结束\n和";
+        assert_eq!(run_source(src).unwrap(), Object::Int(6));
+    }
+
+    #[test]
+    fn 插值字符串变量与表达式() {
+        let src = "变量 名称 = \"凡语言\"\n\"你好，$名称\"";
+        assert_eq!(run_source(src).unwrap(), Object::string("你好，凡语言"));
+
+        let src2 = "变量 数量 = 3\n\"共 ${数量 乘 2} 个\"";
+        assert_eq!(run_source(src2).unwrap(), Object::string("共 6 个"));
+    }
+
+    #[test]
+    fn 插值字符串相邻与空值() {
+        let src = "变量 a = 1\n变量 b = 2\n\"$a$b\"";
+        assert_eq!(run_source(src).unwrap(), Object::string("12"));
+
+        let src2 = "变量 x = 空\n\"值：$x\"";
+        assert_eq!(run_source(src2).unwrap(), Object::string("值：空"));
+    }
+
+    #[test]
+    fn 插值字符串普通美元符号与转义() {
+        let src = "\"价格 $100\"";
+        assert_eq!(run_source(src).unwrap(), Object::string("价格 $100"));
+
+        let src2 = "变量 x = 1\n\"\\$x 不是 $x\"";
+        assert_eq!(run_source(src2).unwrap(), Object::string("$x 不是 1"));
+    }
+
+    #[test]
+    fn 判断值匹配多候选与默认分支() {
+        let src = "函数 归类(整数 码)\n\
+                    判断 码\n\
+                        为 200 则 返回 \"成功\"\n\
+                        为 301、302 时 返回 \"重定向\"\n\
+                        为 404\n 返回 \"未找到\"\n\
+                        其他 则 返回 \"其他\"\n\
+                    结束\n结束\n\
+                    归类(302)";
+        assert_eq!(run_source(src).unwrap(), Object::string("重定向"));
+        assert_eq!(
+            run_source(&src.replace("归类(302)", "归类(500)")).unwrap(),
+            Object::string("其他")
+        );
+        assert_eq!(
+            run_source(&src.replace("归类(302)", "归类(404)")).unwrap(),
+            Object::string("未找到")
+        );
+    }
+
+    #[test]
+    fn 判断守卫分支按顺序短路() {
+        let src = "函数 描述(整数 分)\n\
+                    判断\n\
+                        当 分 大于等于 90 则 返回 \"优\"\n\
+                        当 分 大于等于 60 时 返回 \"及格\"\n\
+                        其他\n 返回 \"不及格\"\n\
+                    结束\n结束\n\
+                    描述(70)";
+        assert_eq!(run_source(src).unwrap(), Object::string("及格"));
+        assert_eq!(
+            run_source(&src.replace("描述(70)", "描述(30)")).unwrap(),
+            Object::string("不及格")
+        );
+    }
+
+    #[test]
+    fn 判断无命中且无默认落空为空() {
+        let src = "变量 结果 = \"初始\"\n\
+                    判断 2\n 为 1 则 结果 = \"一\"\n 结束\n结果";
+        assert_eq!(run_source(src).unwrap(), Object::string("初始"));
+    }
+
+    #[test]
+    fn 判断分支体可含多条语句() {
+        let src = "函数 累计(整数 档)\n 变量 总和 = 0\n\
+                    判断 档\n\
+                        为 1 则\n 总和 = 总和 加 10\n 总和 = 总和 加 5\n\
+                        为 2 则\n 总和 = 总和 加 1\n\
+                        其他 则 总和 = 总和 减 1\n\
+                    结束\n 返回 总和\n结束\n\
+                    累计(1)";
+        assert_eq!(run_source(src).unwrap(), Object::Int(15));
+    }
+
+    #[test]
+    fn 遍历函数返回的数组用动态标签() {
+        let src = "函数 造数组()\n 返回 [10, 20, 30]\n结束\n\
+                    变量 和 = 0\n遍历 造数组() 中的 元素\n 和 = 和 加 元素\n结束\n和";
+        assert_eq!(run_source(src).unwrap(), Object::Int(60));
+    }
+
+    #[test]
+    fn 动态标签按运行期实际类型分派字符串与字典() {
+        let src = "函数 取串()\n 返回 \"ab\"\n结束\n\
+                    变量 拼 = \"\"\n遍历 取串() 中的 字\n 拼 = 拼 加 字\n结束\n拼";
+        assert_eq!(run_source(src).unwrap(), Object::string("ab"));
+
+        let src2 = "函数 取字典()\n 返回 {\"甲\": 1, \"乙\": 2}\n结束\n\
+                    变量 和 = 0\n遍历 取字典() 中的 键 值\n 和 = 和 加 值\n结束\n和";
+        assert_eq!(run_source(src2).unwrap(), Object::Int(3));
+    }
+
+    #[test]
+    fn 复合赋值四则运算写回() {
+        let src = "变量 x = 10\nx += 3\nx";
+        assert_eq!(run_source(src).unwrap(), Object::Int(13));
+        let src3 = "变量 x = 10\nx -= 4\nx";
+        assert_eq!(run_source(src3).unwrap(), Object::Int(6));
+        let src4 = "变量 x = 6\nx *= 7\nx";
+        assert_eq!(run_source(src4).unwrap(), Object::Int(42));
+        let src5 = "变量 s = \"a\"\ns += \"b\"\ns";
+        assert_eq!(run_source(src5).unwrap(), Object::string("ab"));
     }
 }
