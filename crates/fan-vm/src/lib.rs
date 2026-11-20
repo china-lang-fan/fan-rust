@@ -664,4 +664,23 @@ mod tests {
                     变量 m = 整机(\"001\", \"X1\")\nm.描述()\n";
         assert_eq!(run_source(src).unwrap(), Object::string("部件:001"));
     }
+
+    #[test]
+    fn 基本类型扩展方法绑定接收者() {
+        let src = "定义 字符串 的 方法 感叹() -> 字符串\n 返回 自己 加 \"!\"\n结束\n\
+                    \"你好\".感叹()\n";
+        assert_eq!(run_source(src).unwrap(), Object::string("你好!"));
+    }
+
+    #[test]
+    fn 基本类型扩展方法支持默认参数与裸函数调用() {
+        let src = "函数 包裹(字符串 文本, 字符串 前后 = \"[\") -> 字符串\n 返回 前后 加 文本 加 \"]\"\n结束\n\
+                    定义 字符串 的 方法 包装(字符串 前后 = \"<\") -> 字符串\n 返回 包裹(自己, 前后)\n结束\n\
+                    \"x\".包装()\n";
+        assert_eq!(run_source(src).unwrap(), Object::string("<x]"));
+        let src2 = "函数 包裹(字符串 文本, 字符串 前后 = \"[\") -> 字符串\n 返回 前后 加 文本 加 \"]\"\n结束\n\
+                    定义 字符串 的 方法 包装(字符串 前后 = \"<\") -> 字符串\n 返回 包裹(自己, 前后)\n结束\n\
+                    \"x\".包装(\"(\")\n";
+        assert_eq!(run_source(src2).unwrap(), Object::string("(x]"));
+    }
 }

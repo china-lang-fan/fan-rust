@@ -1018,9 +1018,6 @@ impl<'p> Compiler<'p> {
     /// 基本类型（字符串/数组等）的方法扩展留待后续里程碑。
     fn compile_method_def(&mut self, m: &fan_ast::stmt::MethodDef) -> CompileResult<()> {
         self.line(m.pos.line as u32);
-        if m.primitive {
-            return Err("字节码编译器暂不支持基本类型的方法扩展".to_string());
-        }
         let f = &m.function;
         let mut child = self.child();
         // 隐式接收者固定占据槽 0，显式参数顺延到槽 1..。
@@ -1086,6 +1083,7 @@ impl<'p> Compiler<'p> {
             class_name: m.class_name.clone(),
             method_name: m.method_name.clone(),
             function_index,
+            primitive: m.primitive,
         });
         Ok(())
     }

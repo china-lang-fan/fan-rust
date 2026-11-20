@@ -109,12 +109,14 @@ pub struct ClassChunk {
 /// 把接收者作为首参注入。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MethodChunk {
-    /// 所属模型名。
+    /// 所属模型名；基本类型方法为凡语言类型名（如 `字符串`）。
     pub class_name: String,
     /// 方法名。
     pub method_name: String,
     /// 方法体在模块 `functions` 表中的索引。
     pub function_index: u16,
+    /// 是否为基本类型（字符串/数组等）扩展方法；VM 按接收者运行时类型登记。
+    pub primitive: bool,
 }
 
 impl Chunk {

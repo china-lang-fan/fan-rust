@@ -45,6 +45,9 @@ pub struct Vm<'m> {
     class_registry: HashMap<String, Rc<fan_object::Class>>,
     /// 字节码方法表：(类名, 方法名) → (所属模块, 函数表索引)，GetMember 命中时构造绑定闭包。
     method_registry: HashMap<(String, String), (ModuleId, u16)>,
+    /// 基本类型扩展方法表：(运行时类型标识, 方法名) → (所属模块, 函数表索引)。
+    /// 运行时类型标识取 fan_object::runtime_type_name（如 string/array），命名类型穿透到底层。
+    primitive_method_registry: HashMap<(String, String), (ModuleId, u16)>,
     /// 模块加载器；遇到 LoadModule 时按路径解析。未注入则导入语句报错。
     loader: Option<Box<dyn ModuleLoader>>,
     /// 主模块借用的生命周期标记（兼容既有 `Vm::new(&module, ..)` 签名）。
@@ -54,8 +57,9 @@ pub struct Vm<'m> {
 impl<'m> Vm<'m> {
     pub fn new(module: &'m ModuleChunk, runtime: Rc<RefCell<Runtime>>) -> Self {
         let mut table = HashMap::new();
-        table.insert(MAIN_MODULE, Rc::new(module.clone()));
-        Vm {
+        let main = Rc::new(module.clone());
+        table.insert(MAIN_MODULE, Rc::clone(&main));
+        let mut vm = Vm {
             modules: Rc::new(RefCell::new(table)),
             current_module: MAIN_MODULE,
             runtime,
@@ -67,13 +71,32 @@ impl<'m> Vm<'m> {
             functions: VmFunctionRegistry::shared(),
             class_registry: HashMap::new(),
             method_registry: HashMap::new(),
+            primitive_method_registry: HashMap::new(),
             loader: None,
             _marker: std::marker::PhantomData,
+        };
+        vm.register_primitive_methods(MAIN_MODULE, &main);
+        vm
+    }
+
+    /// 登记一个模块中全部基本类型扩展方法，按接收者运行时类型标识建索引。
+    fn register_primitive_methods(&mut self, id: ModuleId, module: &ModuleChunk) {
+        for method in &module.methods {
+            if method.primitive {
+                if let Some(kind) = fan_object::primitive_kind_from_name(&method.class_name) {
+                    self.primitive_method_registry.insert(
+                        (kind.to_string(), method.method_name.clone()),
+                        (id, method.function_index),
+                    );
+                }
+            }
         }
     }
 
     /// 注册一个已链接的外部模块块。供模块加载器在执行前/执行中装配。
     pub fn register_module(&mut self, id: ModuleId, module: Rc<ModuleChunk>) {
+        // 基本类型扩展方法不依赖 BindClass（其模块可能无任何模型），链接时即登记。
+        self.register_primitive_methods(id, &module);
         self.modules.borrow_mut().insert(id, module);
     }
 
@@ -522,8 +545,9 @@ impl<'m> Vm<'m> {
                     self.class_registry
                         .insert(class_chunk.name.clone(), Rc::clone(&class_rc));
                     // 登记本模块中属于该模型的字节码方法，供 GetMember 构造绑定闭包。
+                    // 基本类型扩展方法在 register_module 链接时另行登记，此处跳过。
                     for method in &module.methods {
-                        if method.class_name == class_chunk.name {
+                        if method.class_name == class_chunk.name && !method.primitive {
                             self.method_registry.insert(
                                 (method.class_name.clone(), method.method_name.clone()),
                                 (frame_module, method.function_index),
@@ -686,12 +710,13 @@ impl<'m> Vm<'m> {
             .get(&(class.name.clone(), "初始化".to_string()))
         {
             let (module_id, fn_index) = (*module_id, *fn_index);
+            let upvalues = self.build_method_upvalues(module_id, fn_index)?;
             let bound = self.functions.borrow_mut().make_bound_method(
                 module_id,
                 fn_index,
                 "初始化",
                 Object::Instance(Rc::clone(&inst)),
-                Vec::new(),
+                upvalues,
             );
             // 绑定方法调用：接收者已内置，这里只传显式实参。
             let closure = self
@@ -868,6 +893,56 @@ impl<'m> Vm<'m> {
         self.frame_upvalue(idx as usize)
     }
 
+    /// 为绑定方法解析 upvalue：方法体引用的模块顶层名最终落到所属模块入口帧的
+    /// 局部槽。按编译期描述链，从该入口帧逐个取/建 open 句柄（from_local）或
+    /// 透传同帧上一层 upvalue（from_local=false）。
+    fn build_method_upvalues(
+        &mut self,
+        module_id: ModuleId,
+        fn_index: u16,
+    ) -> VmResult<Vec<Upvalue>> {
+        let module = self.module_chunk(module_id)?;
+        let func = module
+            .functions
+            .get(fn_index as usize)
+            .ok_or_else(|| VmError::new(format!("函数表索引 {fn_index} 越界")))?;
+        // 方法 upvalue 的根是其所属模块的入口帧（栈中同模块最浅的帧）。
+        let frame_pos = self
+            .frames
+            .iter()
+            .position(|f| f.module_id == module_id)
+            .ok_or_else(|| VmError::new("绑定方法时找不到所属模块入口帧"))?;
+        let base = self.frames[frame_pos].slot_base;
+        let mut captured: Vec<Upvalue> = Vec::with_capacity(func.upvalues.len());
+        for desc in &func.upvalues {
+            let up = if desc.from_local {
+                let abs = base + desc.index as usize;
+                if let Some((_, up)) = self.frames[frame_pos]
+                    .open_upvalues
+                    .iter()
+                    .find(|(pos, _)| *pos == abs)
+                {
+                    Rc::clone(up)
+                } else {
+                    let initial = self.slots.get(abs).cloned().unwrap_or(Object::Nil);
+                    let cell: Upvalue = Rc::new(RefCell::new(initial));
+                    self.frames[frame_pos]
+                        .open_upvalues
+                        .push((abs, Rc::clone(&cell)));
+                    cell
+                }
+            } else {
+                Rc::clone(
+                    captured
+                        .get(desc.index as usize)
+                        .ok_or_else(|| VmError::new("绑定方法 upvalue 链断裂"))?,
+                )
+            };
+            captured.push(up);
+        }
+        Ok(captured)
+    }
+
     /// 下标读取，语义对齐树遍历求值器：数组按整数下标、字符串产字符、
     /// 字典按键查找（缺失返回空）。
     fn get_index(&self, target: &Object, index: &Object) -> VmResult<Object> {
@@ -988,7 +1063,7 @@ impl<'m> Vm<'m> {
         None
     }
 
-    fn get_member(&self, object: &Object, name: &str) -> VmResult<Object> {
+    fn get_member(&mut self, object: &Object, name: &str) -> VmResult<Object> {
         match object.unwrap_named() {
             Object::Module(module) => module.borrow().exports.get(name).cloned().ok_or_else(|| {
                 VmError::new(format!("模块 {} 没有公开成员 {name}", module.borrow().name))
@@ -1016,12 +1091,13 @@ impl<'m> Vm<'m> {
                 }
                 // 字段未命中，尝试字节码方法：先查自身模型，再沿嵌入链提升查找。
                 if let Some((module_id, fn_index)) = self.resolve_method(&inst.class, name) {
+                    let upvalues = self.build_method_upvalues(module_id, fn_index)?;
                     let bound = self.functions.borrow_mut().make_bound_method(
                         module_id,
                         fn_index,
                         name,
                         object.clone(),
-                        Vec::new(),
+                        upvalues,
                     );
                     return Ok(bound);
                 }
@@ -1030,7 +1106,27 @@ impl<'m> Vm<'m> {
                     inst.class.name
                 )))
             }
-            other => Err(VmError::new(format!("{} 不支持成员访问", other.kind()))),
+            other => {
+                // 基本类型（字符串/数组等）：内建成员未命中后查扩展方法表，
+                // 命中则构造绑定当前接收者的方法闭包。
+                let kind = fan_object::runtime_type_name(&other).to_string();
+                if let Some((module_id, fn_index)) = self
+                    .primitive_method_registry
+                    .get(&(kind, name.to_string()))
+                {
+                    let (module_id, fn_index) = (*module_id, *fn_index);
+                    let upvalues = self.build_method_upvalues(module_id, fn_index)?;
+                    let bound = self.functions.borrow_mut().make_bound_method(
+                        module_id,
+                        fn_index,
+                        name,
+                        object.clone(),
+                        upvalues,
+                    );
+                    return Ok(bound);
+                }
+                Err(VmError::new(format!("{} 不支持成员访问", other.kind())))
+            }
         }
     }
 

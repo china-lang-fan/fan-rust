@@ -322,16 +322,19 @@ impl MethodChunk {
         w.string(&self.class_name);
         w.string(&self.method_name);
         w.u16(self.function_index);
+        w.u8(if self.primitive { 1 } else { 0 });
     }
 
     fn read(r: &mut Reader) -> CodeResult<MethodChunk> {
         let class_name = r.string()?;
         let method_name = r.string()?;
         let function_index = r.u16()?;
+        let primitive = r.u8()? != 0;
         Ok(MethodChunk {
             class_name,
             method_name,
             function_index,
+            primitive,
         })
     }
 }
