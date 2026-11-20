@@ -10,6 +10,7 @@
 
 mod error;
 mod frame;
+mod loader;
 mod ops;
 mod upvalue;
 mod value;
@@ -17,7 +18,10 @@ mod vm;
 mod vm_function;
 
 pub use error::{VmError, VmResult};
-pub use vm::Vm;
+pub use loader::ModuleLoader;
+pub use upvalue::ModuleId;
+pub use vm::{SharedModules, Vm, MAIN_MODULE};
+pub use vm_function::SharedRegistry;
 
 #[cfg(test)]
 mod tests {

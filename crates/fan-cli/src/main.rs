@@ -18,6 +18,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::rc::Rc;
 
+mod vm_loader;
+use vm_loader::FsModuleLoader;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// 执行引擎：树遍历求值器（默认）或栈式字节码虚拟机。
@@ -163,19 +166,37 @@ fn run_file(path: &str, script_args: &[String], engine: Engine) -> Result<(), St
             let mut interp = Interpreter::for_script(rt, default_modules_dirs(&dir), &dir, &abs);
             interp.run(&program).map_err(|e| e.display())?;
         }
-        Engine::Vm => run_vm(&program, rt)?,
+        Engine::Vm => run_vm(&program, rt, &dir)?,
     }
     Ok(())
 }
 
 /// 以栈式字节码虚拟机执行已解析的程序：先 AST→ModuleChunk 编译，再取指执行。
 ///
-/// VM 当前只覆盖 M1 子集，遇到编译器不支持的语法会返回明确错误，由调用方提示
-/// 回退到默认树遍历引擎。
-fn run_vm(program: &fan_ast::Program, rt: Rc<RefCell<Runtime>>) -> Result<(), String> {
+/// 注入基于文件系统的模块加载器，使 `导入` 语句可在运行期解析外部纯凡模块；
+/// 遇到 fan-code 尚未覆盖的语法会返回明确错误，由调用方提示回退树遍历引擎。
+fn run_vm(
+    program: &fan_ast::Program,
+    rt: Rc<RefCell<Runtime>>,
+    script_dir: &str,
+) -> Result<(), String> {
     fan_eval::register_builtins(&mut rt.borrow_mut());
     let module = fan_code::compiler::compile_program(program)?;
-    let mut vm = fan_vm::Vm::new(&module, rt);
+    // 先建主 VM 取得共享闭包注册表与模块表，再让加载器与最终主 VM 复用同一实例，
+    // 保证被导入模块在子 VM 中登记的字节码闭包/模块块能在主 VM 调用时被识别。
+    let seed = fan_vm::Vm::new(&module, Rc::clone(&rt));
+    let registry = seed.shared_registry();
+    let modules = seed.shared_modules();
+    let loader = FsModuleLoader::new(
+        script_dir,
+        Rc::clone(&rt),
+        Rc::clone(&registry),
+        Rc::clone(&modules),
+    );
+    let mut vm = fan_vm::Vm::new(&module, rt)
+        .with_shared_registry(registry)
+        .with_shared_modules(modules)
+        .with_loader(Box::new(loader));
     vm.run().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -695,6 +716,97 @@ mod tests {
         let err = run_engine_captured("变量 甲 = [1]\n变量 乙 = [...甲]\n打印行(乙)\n", Engine::Vm)
             .unwrap_err();
         assert!(err.contains("暂不支持"), "实际：{err}");
+    }
+
+    /// 文件级双引擎对拍：在临时目录运行主模块（可含导入），用内存输出 sink
+    /// 捕获结果并写入指定文件，供 tree/vm 两次运行后比对。
+    fn run_file_engine_captured(path: &str, engine: Engine, out_file: &str) {
+        let source = std::fs::read_to_string(path).unwrap();
+        let (program, errors) = parse_program(&source);
+        assert!(errors.is_empty(), "解析错误：{:?}", errors.0);
+        let sink: Rc<RefCell<std::io::Cursor<Vec<u8>>>> =
+            Rc::new(RefCell::new(std::io::Cursor::new(Vec::new())));
+        let rt = Rc::new(RefCell::new(Runtime::with_output(sink.clone())));
+        let abs = abs_path(path);
+        let dir = Path::new(&abs)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        match engine {
+            Engine::Tree => {
+                let mut interp =
+                    Interpreter::for_script(rt, default_modules_dirs(&dir), &dir, &abs);
+                interp.run(&program).unwrap();
+            }
+            Engine::Vm => run_vm(&program, rt, &dir).unwrap(),
+        }
+        let captured = String::from_utf8(sink.borrow().get_ref().clone()).unwrap();
+        std::fs::write(out_file, captured).unwrap();
+    }
+
+    #[test]
+    fn 双引擎对拍文件模块导入与嵌套导入() {
+        let dir = temp_dir("import");
+        let lib = dir.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        write(
+            &lib,
+            "运算.凡",
+            "公开 变量 版本 = \"1.0\"\n\
+             公开 函数 加倍(整数 n) -> 整数\n  返回 n 乘 2\n结束\n\
+             公开 函数 相加(整数 a, 整数 b) -> 整数\n  返回 a 加 b\n结束\n",
+        );
+        let main_path = write(
+            &dir,
+            "主.凡",
+            "导入 \"lib/运算\"\n\
+             打印行(运算.加倍(21))\n打印行(运算.版本)\n打印行(运算.相加(3, 4))\n",
+        );
+        let tree_out = dir.join("tree.txt").to_string_lossy().to_string();
+        let vm_out = dir.join("vm.txt").to_string_lossy().to_string();
+        run_file_engine_captured(&main_path, Engine::Tree, &tree_out);
+        run_file_engine_captured(&main_path, Engine::Vm, &vm_out);
+        assert_eq!(
+            std::fs::read_to_string(&tree_out).unwrap(),
+            std::fs::read_to_string(&vm_out).unwrap(),
+            "模块导入双引擎输出不一致"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 双引擎对拍模块别名与嵌套导入() {
+        let dir = temp_dir("nested-import");
+        let lib = dir.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        write(
+            &lib,
+            "运算.凡",
+            "公开 函数 相加(整数 a, 整数 b) -> 整数\n  返回 a 加 b\n结束\n",
+        );
+        let lib2 = dir.join("lib2");
+        std::fs::create_dir_all(&lib2).unwrap();
+        write(
+            &lib2,
+            "几何.凡",
+            "导入 \"lib/运算\" 作为 运\n\
+             公开 函数 面积(整数 宽, 整数 高) -> 整数\n  返回 运.相加(宽, 高) 乘 2\n结束\n",
+        );
+        let main_path = write(
+            &dir,
+            "主.凡",
+            "导入 \"lib2/几何\" 作为 几\n打印行(几.面积(3, 4))\n",
+        );
+        let tree_out = dir.join("tree.txt").to_string_lossy().to_string();
+        let vm_out = dir.join("vm.txt").to_string_lossy().to_string();
+        run_file_engine_captured(&main_path, Engine::Tree, &tree_out);
+        run_file_engine_captured(&main_path, Engine::Vm, &vm_out);
+        assert_eq!(
+            std::fs::read_to_string(&tree_out).unwrap(),
+            std::fs::read_to_string(&vm_out).unwrap(),
+            "嵌套导入双引擎输出不一致"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

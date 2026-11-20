@@ -14,51 +14,142 @@ use fan_object::{Builtin, Object, Runtime};
 
 use crate::error::{VmError, VmResult};
 use crate::frame::Frame;
-use crate::upvalue::Upvalue;
+use crate::loader::ModuleLoader;
+use crate::upvalue::{ModuleId, Upvalue};
 use crate::value::const_to_object;
-use crate::vm_function::VmFunctionRegistry;
+use crate::vm_function::{SharedRegistry, VmFunctionRegistry};
+
+/// 主模块在模块表中的固定标识。
+pub const MAIN_MODULE: ModuleId = 0;
+
+/// 跨 VM 共享的模块表：模块 ID → 模块块（持有所有权）。
+pub type SharedModules = Rc<RefCell<HashMap<ModuleId, Rc<ModuleChunk>>>>;
 
 /// 单线程栈式虚拟机。
 pub struct Vm<'m> {
-    module: &'m ModuleChunk,
+    /// 已链接的模块表，主模块固定为 [`MAIN_MODULE`]；主/子 VM 与加载器共享。
+    modules: SharedModules,
+    /// 当前执行的模块 ID（帧自身也记录所属模块，这里仅为入口运行提供默认值）。
+    current_module: ModuleId,
     runtime: Rc<RefCell<Runtime>>,
     frames: Vec<Frame>,
     stack: Vec<Object>,
     /// 每帧独立的局部槽位区，按帧槽位基址切片。
     slots: Vec<Object>,
     globals: HashMap<String, Object>,
-    functions: VmFunctionRegistry,
+    /// 跨模块共享的字节码闭包登记表。
+    functions: SharedRegistry,
+    /// 模块加载器；遇到 LoadModule 时按路径解析。未注入则导入语句报错。
+    loader: Option<Box<dyn ModuleLoader>>,
+    /// 主模块借用的生命周期标记（兼容既有 `Vm::new(&module, ..)` 签名）。
+    _marker: std::marker::PhantomData<&'m ()>,
 }
 
 impl<'m> Vm<'m> {
     pub fn new(module: &'m ModuleChunk, runtime: Rc<RefCell<Runtime>>) -> Self {
+        let mut table = HashMap::new();
+        table.insert(MAIN_MODULE, Rc::new(module.clone()));
         Vm {
-            module,
+            modules: Rc::new(RefCell::new(table)),
+            current_module: MAIN_MODULE,
             runtime,
             frames: Vec::new(),
             stack: Vec::new(),
             slots: Vec::new(),
             globals: HashMap::new(),
-            functions: VmFunctionRegistry::new(),
+            functions: VmFunctionRegistry::shared(),
+            loader: None,
+            _marker: std::marker::PhantomData,
         }
+    }
+
+    /// 注册一个已链接的外部模块块。供模块加载器在执行前/执行中装配。
+    pub fn register_module(&mut self, id: ModuleId, module: Rc<ModuleChunk>) {
+        self.modules.borrow_mut().insert(id, module);
+    }
+
+    /// 当前共享模块表句柄，供加载子模块的子 VM 与加载器复用。
+    pub fn shared_modules(&self) -> SharedModules {
+        Rc::clone(&self.modules)
+    }
+
+    /// 注入外部共享模块表，使子 VM 与主 VM 看到同一组已链接模块。
+    pub fn with_shared_modules(mut self, modules: SharedModules) -> Self {
+        self.modules = modules;
+        self
+    }
+
+    /// 注入模块加载器，使 `导入` 语句可在运行期解析外部模块。
+    pub fn with_loader(mut self, loader: Box<dyn ModuleLoader>) -> Self {
+        self.loader = Some(loader);
+        self
+    }
+
+    /// 暴露共享注册表，供加载子模块的子 VM 复用同一张闭包身份表。
+    pub fn shared_registry(&self) -> SharedRegistry {
+        Rc::clone(&self.functions)
+    }
+
+    /// 注入外部共享注册表，使子 VM 与主 VM 共享闭包身份表（跨模块调用）。
+    pub fn with_shared_registry(mut self, registry: SharedRegistry) -> Self {
+        self.functions = registry;
+        self
     }
 
     /// 执行模块入口块，返回入口的最终值。
     pub fn run(&mut self) -> VmResult<Object> {
+        self.run_module(self.current_module)
+    }
+
+    /// 以指定模块 ID 的身份执行入口块（模块加载器用子 VM 执行被导入模块时使用）。
+    pub fn run_module(&mut self, module_id: ModuleId) -> VmResult<Object> {
+        // 确认目标模块已链接，未链接则提前报错而非在取指时 panic。
+        self.module_chunk(module_id)?;
         let base = self.slots.len();
-        self.frames.push(Frame::entry(base));
+        self.frames.push(Frame::entry(module_id, base));
         let result = self.execute();
         self.frames.pop();
         result
     }
 
-    fn current_chunk(&self) -> &Chunk {
+    /// 读取最近一次入口执行后、入口槽位 `slot` 中的值（供模块加载器回收导出）。
+    ///
+    /// 模块入口帧已弹出，但其槽位仍保留在 `slots` 中（未被后续调用覆盖时），
+    /// 因此按入口帧记录的基址读取。调用方需在入口 `run` 之后、任何嵌套调用
+    /// 回收槽位之前立即读取。
+    pub fn entry_slot(&self, entry_base: usize, slot: u16) -> Object {
+        self.slots
+            .get(entry_base + slot as usize)
+            .cloned()
+            .unwrap_or(Object::Nil)
+    }
+
+    /// 当前 `slots` 长度，模块加载器据此记录入口帧基址。
+    pub fn slots_len(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn module_chunk(&self, id: ModuleId) -> VmResult<Rc<ModuleChunk>> {
+        self.modules
+            .borrow()
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| VmError::new(format!("模块 {id} 未链接到 VM")))
+    }
+
+    fn current_chunk(&self) -> std::cell::Ref<'_, Chunk> {
         let frame = self.frames.last().expect("执行时必须存在调用帧");
-        if frame.function_index == Frame::ENTRY {
-            &self.module.entry
-        } else {
-            &self.module.functions[frame.function_index as usize].body
-        }
+        let modules = self.modules.borrow();
+        // 安全：返回的 Ref 借用 modules，调用方仅在单条指令内即时使用，
+        // 不会跨会触发模块表变更的语句。用 Ref::map 投影到具体 Chunk。
+        std::cell::Ref::map(modules, |table| {
+            let module = table.get(&frame.module_id).expect("帧模块已链接");
+            if frame.function_index == Frame::ENTRY {
+                &module.entry
+            } else {
+                &module.functions[frame.function_index as usize].body
+            }
+        })
     }
 
     fn line_at(&self, chunk: &Chunk, frame: &Frame) -> Option<u32> {
@@ -164,8 +255,13 @@ impl<'m> Vm<'m> {
                 }
                 Opcode::MakeClosure(_) => {
                     let index = self.read_u16(&chunk)?;
+                    let module_id = self
+                        .frames
+                        .last()
+                        .map(|f| f.module_id)
+                        .unwrap_or(MAIN_MODULE);
                     let func = self
-                        .module
+                        .module_chunk(module_id)?
                         .functions
                         .get(index as usize)
                         .cloned()
@@ -181,7 +277,10 @@ impl<'m> Vm<'m> {
                         };
                         upvalues.push(upvalue);
                     }
-                    let value = self.functions.make_closure(index, &func.name, upvalues);
+                    let value = self
+                        .functions
+                        .borrow_mut()
+                        .make_closure(module_id, index, &func.name, upvalues);
                     self.stack.push(value);
                 }
                 Opcode::LoadUpvalue(_) => {
@@ -292,6 +391,17 @@ impl<'m> Vm<'m> {
                     let result = self.get_slice(&target, &low, &high)?;
                     self.stack.push(result);
                 }
+                Opcode::LoadModule(_) => {
+                    let idx = self.read_u16(&chunk)? as usize;
+                    let path = self.string_const(&chunk, idx)?;
+                    let module = match self.loader.as_mut() {
+                        Some(loader) => loader.load(&path)?,
+                        None => {
+                            return Err(VmError::new(format!("未注入模块加载器，无法导入 {path}")))
+                        }
+                    };
+                    self.stack.push(module);
+                }
                 Opcode::GetMember(_) => {
                     let idx = self.read_u16(&chunk)? as usize;
                     let name = self.string_const(&chunk, idx)?;
@@ -353,10 +463,13 @@ impl<'m> Vm<'m> {
             .pop()
             .ok_or_else(|| VmError::new("Call 时缺少可调用对象"))?;
         let args = self.pop_args(argc)?;
-        if let Some(closure) = self.functions.lookup(&callee) {
+        let closure = self.functions.borrow().lookup(&callee);
+        if let Some(closure) = closure {
+            let module_id = closure.module_id;
             let index = closure.function_index;
             let upvalues = closure.upvalues.clone();
-            self.invoke_bytecode_function(index, upvalues, args)?;
+            drop(closure);
+            self.invoke_bytecode_function(module_id, index, upvalues, args)?;
             return Ok(());
         }
         match callee {
@@ -385,11 +498,13 @@ impl<'m> Vm<'m> {
 
     fn invoke_bytecode_function(
         &mut self,
+        module_id: ModuleId,
         index: u16,
         upvalues: Vec<Upvalue>,
         args: Vec<Object>,
     ) -> VmResult<()> {
-        let func = &self.module.functions[index as usize];
+        let module = self.module_chunk(module_id)?;
+        let func = &module.functions[index as usize];
         let fixed = func.arity.fixed;
         let variadic = func.arity.variadic;
         let min_required = fixed - func.arity.optional;
@@ -421,7 +536,7 @@ impl<'m> Vm<'m> {
             };
             self.slots.push(Object::array(rest));
         }
-        let mut frame = Frame::function(index, base, args.len());
+        let mut frame = Frame::function(module_id, index, base, args.len());
         // 闭包携带的 upvalue 作为本帧 upvalue 槽的前缀，Load/StoreUpvalue 按索引访问。
         // 这些句柄来自外层，abs_pos 用哨兵标记，帧退出时不做关闭处理。
         frame.open_upvalues = upvalues.into_iter().map(|up| (usize::MAX, up)).collect();
@@ -603,6 +718,9 @@ impl<'m> Vm<'m> {
     /// M3 仅覆盖数据成员；方法分派、嵌入提升与命名类型方法在后续里程碑接入。
     fn get_member(&self, object: &Object, name: &str) -> VmResult<Object> {
         match object.unwrap_named() {
+            Object::Module(module) => module.borrow().exports.get(name).cloned().ok_or_else(|| {
+                VmError::new(format!("模块 {} 没有公开成员 {name}", module.borrow().name))
+            }),
             Object::Dict(dict) => {
                 if let Some(v) = dict.get(&Object::string(name)) {
                     return Ok(v);
@@ -620,6 +738,10 @@ impl<'m> Vm<'m> {
     /// 成员写入：字典按键写入、实例写自身字段。
     fn set_member(&self, object: &Object, name: &str, value: Object) -> VmResult<()> {
         match object.unwrap_named() {
+            Object::Module(module) => {
+                module.borrow_mut().set(name, value);
+                Ok(())
+            }
             Object::Dict(mut dict) => {
                 dict.set(Object::string(name), value);
                 Ok(())

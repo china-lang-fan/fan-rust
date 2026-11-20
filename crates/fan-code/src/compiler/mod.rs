@@ -47,6 +47,7 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
         functions,
         exports,
         imports,
+        top_slots: compiler.scope.root_slots(),
     })
 }
 
@@ -249,6 +250,31 @@ impl<'p> Compiler<'p> {
                 self.compile_expr(&a.value)?;
                 let name_idx = self.add_string_const(&a.name);
                 self.builder.emit(Opcode::SetMember(name_idx));
+                Ok(())
+            }
+            Stmt::Import(import) => {
+                self.line(import.pos.line as u32);
+                // 记录静态路径供装配层预编译/校验；运行期由注入的加载器解析。
+                if !self.imports.borrow().contains(&import.path) {
+                    self.imports.borrow_mut().push(import.path.clone());
+                }
+                let path_idx = self.add_string_const(&import.path);
+                self.builder.emit(Opcode::LoadModule(path_idx));
+                // 模块对象绑定到别名（默认名取路径末段），作为当前作用域局部。
+                let slot = self.scope.declare(&import.name);
+                self.builder.emit(Opcode::StoreLocal(slot));
+                Ok(())
+            }
+            Stmt::Visibility(vis) => {
+                self.line(vis.pos.line as u32);
+                // 先编译内部声明（函数/变量等），再按可见性登记导出名。
+                self.compile_stmt(&vis.inner)?;
+                if vis.visibility == fan_ast::stmt::Visibility::Public {
+                    let mut exports = self.exports.borrow_mut();
+                    if !exports.contains(&vis.name) {
+                        exports.push(vis.name.clone());
+                    }
+                }
                 Ok(())
             }
             other => Err(format!(

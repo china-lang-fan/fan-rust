@@ -73,6 +73,15 @@ impl ScopeTracker {
         }
         None
     }
+
+    /// 导出根作用域（模块入口顶层）的「名字 → 槽位」映射，
+    /// 供装配层在执行模块入口后按名回收顶层绑定（模块导出）。
+    pub fn root_slots(&self) -> Vec<(String, u16)> {
+        self.scopes
+            .first()
+            .map(|scope| scope.names.clone())
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

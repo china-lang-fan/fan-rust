@@ -61,6 +61,7 @@ mod tests {
             }],
             exports: vec!["加倍".to_string()],
             imports: vec!["依赖/问候包/库/问候".to_string()],
+            top_slots: vec![("加倍".to_string(), 0)],
         }
     }
 

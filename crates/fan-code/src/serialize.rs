@@ -298,6 +298,11 @@ impl ModuleChunk {
         for i in &self.imports {
             w.string(i);
         }
+        w.u32(self.top_slots.len() as u32);
+        for (name, slot) in &self.top_slots {
+            w.string(name);
+            w.u16(*slot);
+        }
     }
 
     fn read_body(r: &mut Reader) -> CodeResult<ModuleChunk> {
@@ -317,11 +322,19 @@ impl ModuleChunk {
         for _ in 0..import_len {
             imports.push(r.string()?);
         }
+        let top_len = r.u32()? as usize;
+        let mut top_slots = Vec::with_capacity(top_len);
+        for _ in 0..top_len {
+            let name = r.string()?;
+            let slot = r.u16()?;
+            top_slots.push((name, slot));
+        }
         Ok(ModuleChunk {
             entry,
             functions,
             exports,
             imports,
+            top_slots,
         })
     }
 }

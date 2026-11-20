@@ -18,10 +18,15 @@ use fan_object::Object;
 /// 因此写入对所有闭包可见，符合树遍历求值器基于环境的共享语义。
 pub type Upvalue = Rc<RefCell<Object>>;
 
-/// 闭包值：字节码函数表索引 + 已解析的 upvalue 句柄。
+/// 模块在 VM 模块表中的标识（主模块为 0，被导入模块按加载顺序编号）。
+pub type ModuleId = u16;
+
+/// 闭包值：所属模块、字节码函数表索引 + 已解析的 upvalue 句柄。
 #[derive(Clone)]
 pub struct Closure {
-    /// 对应 `ModuleChunk.functions` 的索引。
+    /// 函数体所在模块（跨模块调用时据此定位 ModuleChunk）。
+    pub module_id: ModuleId,
+    /// 对应所属模块 `ModuleChunk.functions` 的索引。
     pub function_index: u16,
     /// 顺序与该函数 `FunctionChunk.upvalues` 描述一致。
     pub upvalues: Vec<Upvalue>,

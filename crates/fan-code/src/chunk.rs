@@ -81,6 +81,8 @@ pub struct ModuleChunk {
     pub exports: Vec<String>,
     /// 静态记录的导入模块路径（实际加载策略由运行时决定）。
     pub imports: Vec<String>,
+    /// 模块入口顶层「名字 → 入口局部槽位」映射，供装配层执行入口后回收导出值。
+    pub top_slots: Vec<(String, u16)>,
 }
 
 impl Chunk {
