@@ -6,11 +6,14 @@
 
 mod scope;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use fan_ast::expr::Expr;
 use fan_ast::stmt::Stmt;
 use fan_ast::Program;
 
-use crate::chunk::{Arity, ChunkBuilder, FunctionChunk, ModuleChunk};
+use crate::chunk::{Arity, ChunkBuilder, FunctionChunk, ModuleChunk, UpvalueDesc};
 use crate::opcode::Opcode;
 use crate::ConstValue;
 
@@ -21,26 +24,45 @@ pub type CompileResult<T> = Result<T, String>;
 
 /// 把一份程序（一个源文件）编译为模块块。
 pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
-    let mut compiler = Compiler::new();
+    let functions = Rc::new(RefCell::new(Vec::new()));
+    let exports = Rc::new(RefCell::new(Vec::new()));
+    let imports = Rc::new(RefCell::new(Vec::new()));
+    let mut compiler = Compiler::new(functions, exports, imports);
     compiler.compile_statements(&program.statements)?;
     // 入口块以 Halt 收尾，停机时值栈顶即顶层最后一个表达式结果（若有）。
     compiler.builder.emit(Opcode::Halt);
     let entry = compiler.builder.build();
 
+    let functions = Rc::try_unwrap(compiler.functions)
+        .expect("函数表无其他引用")
+        .into_inner();
+    let exports = Rc::try_unwrap(compiler.exports)
+        .expect("导出表无其他引用")
+        .into_inner();
+    let imports = Rc::try_unwrap(compiler.imports)
+        .expect("导入表无其他引用")
+        .into_inner();
     Ok(ModuleChunk {
         entry,
-        functions: std::mem::take(&mut compiler.functions),
-        exports: compiler.exports,
-        imports: compiler.imports,
+        functions,
+        exports,
+        imports,
     })
 }
 
-struct Compiler {
+struct Compiler<'p> {
     builder: ChunkBuilder,
-    functions: Vec<FunctionChunk>,
-    exports: Vec<String>,
-    imports: Vec<String>,
+    /// 模块内共享的函数表：嵌套函数按追加顺序登记，MakeClosure 以索引引用。
+    functions: Rc<RefCell<Vec<FunctionChunk>>>,
+    /// 模块导出/导入名，模块内所有函数编译器共享。
+    exports: Rc<RefCell<Vec<String>>>,
+    imports: Rc<RefCell<Vec<String>>>,
     scope: ScopeTracker,
+    /// 当前函数登记的 upvalue 描述，顺序即运行期 upvalue 槽位顺序。
+    upvalues: Vec<UpvalueDesc>,
+    /// 外层函数编译器；模块入口为 None。裸指针仅在递归编译期间使用，
+    /// 父编译器在整个子编译器生命周期内都存活于调用栈上。
+    parent: Option<*mut Compiler<'p>>,
     /// 当前所在函数的参数名（空表示模块入口），用于把参数映射到前置槽位。
     params: Vec<String>,
     /// 是否正在编译模块入口（决定顶层表达式语句是否保留值）。
@@ -57,18 +79,36 @@ struct LoopCtx {
     continues: Vec<usize>,
 }
 
-impl Compiler {
-    fn new() -> Self {
+impl<'p> Compiler<'p> {
+    fn new(
+        functions: Rc<RefCell<Vec<FunctionChunk>>>,
+        exports: Rc<RefCell<Vec<String>>>,
+        imports: Rc<RefCell<Vec<String>>>,
+    ) -> Self {
         Compiler {
             builder: ChunkBuilder::new(),
-            functions: Vec::new(),
-            exports: Vec::new(),
-            imports: Vec::new(),
+            functions,
+            exports,
+            imports,
             scope: ScopeTracker::new(),
+            upvalues: Vec::new(),
+            parent: None,
             params: Vec::new(),
             in_module: true,
             loops: Vec::new(),
         }
+    }
+
+    /// 构造编译某个嵌套函数体的子编译器，挂接父链以支持 upvalue 递归解析。
+    fn child(&self) -> Compiler<'p> {
+        let mut child = Compiler::new(
+            Rc::clone(&self.functions),
+            Rc::clone(&self.exports),
+            Rc::clone(&self.imports),
+        );
+        child.in_module = false;
+        child.parent = Some(self as *const _ as *mut Compiler<'p>);
+        child
     }
 
     fn line(&mut self, line: u32) {
@@ -97,19 +137,25 @@ impl Compiler {
                     self.builder.emit(Opcode::Const(nil));
                 }
                 // 隐式声明（无 `变量` 关键字的 `甲 = 值`）在已有同名变量时是赋值，
-                // 与树遍历求值器一致：解析到既有槽位就原地写入，否则才声明新槽。
-                let slot = if !d.is_explicit {
+                // 与树遍历求值器一致：依次解析局部槽、闭包 upvalue，命中即原地写入，
+                // 都未命中才声明新局部槽。
+                if !d.is_explicit {
                     if let Some(existing) = self.scope.resolve(&d.name) {
-                        existing
-                    } else {
-                        self.scope.declare(&d.name)
+                        self.builder.emit(Opcode::StoreLocal(existing));
+                        return Ok(());
                     }
+                    if let Some(up) = self.resolve_upvalue(&d.name)? {
+                        self.builder.emit(Opcode::StoreUpvalue(up));
+                        return Ok(());
+                    }
+                    let slot = self.scope.declare(&d.name);
+                    self.builder.emit(Opcode::StoreLocal(slot));
                 } else {
-                    self.scope.declare(&d.name)
-                };
-                self.builder.emit(Opcode::StoreLocal(slot));
+                    let slot = self.scope.declare(&d.name);
+                    self.builder.emit(Opcode::StoreLocal(slot));
+                }
                 if matches!(d.visibility, fan_ast::stmt::Visibility::Public) {
-                    self.exports.push(d.name.clone());
+                    self.exports.borrow_mut().push(d.name.clone());
                 }
                 Ok(())
             }
@@ -610,8 +656,7 @@ impl Compiler {
         };
 
         // 在子编译器中生成函数体，局部槽位从参数开始顺序分配。
-        let mut child = Compiler::new();
-        child.in_module = false;
+        let mut child = self.child();
         child.params = f.params.iter().map(|p| p.name.clone()).collect();
         let has_variadic = f.params.iter().any(|p| p.variadic);
         // 固定参数（非可变参数）按出现顺序占据 0..fixed；可变参数固定落在末槽，
@@ -669,10 +714,10 @@ impl Compiler {
             arity,
             params: child.params.clone(),
             body: child.builder.build(),
-            upvalues: Vec::new(),
+            upvalues: child.upvalues,
         };
-        let index = self.functions.len() as u16;
-        self.functions.push(chunk);
+        let index = self.functions.borrow().len() as u16;
+        self.functions.borrow_mut().push(chunk);
         self.builder.emit(Opcode::MakeClosure(index));
 
         // 具名函数同时绑定到当前作用域名，匿名函数仅压栈。
@@ -685,10 +730,12 @@ impl Compiler {
         Ok(())
     }
 
-    /// 按名读取：局部槽优先，未命中则作为全局/原生名。
+    /// 按名读取：局部槽 → upvalue → 全局/原生名。
     fn emit_load_name(&mut self, name: &str) -> CompileResult<()> {
         if let Some(slot) = self.scope.resolve(name) {
             self.builder.emit(Opcode::LoadLocal(slot));
+        } else if let Some(up) = self.resolve_upvalue(name)? {
+            self.builder.emit(Opcode::LoadUpvalue(up));
         } else {
             let idx = self.add_string_const(name);
             self.builder.emit(Opcode::LoadGlobal(idx));
@@ -699,11 +746,48 @@ impl Compiler {
     fn emit_store_name(&mut self, name: &str) -> CompileResult<()> {
         if let Some(slot) = self.scope.resolve(name) {
             self.builder.emit(Opcode::StoreLocal(slot));
+        } else if let Some(up) = self.resolve_upvalue(name)? {
+            self.builder.emit(Opcode::StoreUpvalue(up));
         } else {
             let idx = self.add_string_const(name);
             self.builder.emit(Opcode::StoreGlobal(idx));
         }
         Ok(())
+    }
+
+    /// 把一个外层名字登记为本函数的 upvalue，返回其在本函数 upvalue 表中的槽位。
+    ///
+    /// 先查本函数是否已登记同名 upvalue（去重）；否则向父编译器递归解析：
+    /// 命中父的局部槽 → `from_local=true`；命中父的 upvalue → `from_local=false`，
+    /// 从而支持跨多层嵌套的捕获。模块入口没有父链，未命中返回 None（按全局处理）。
+    fn resolve_upvalue(&mut self, name: &str) -> CompileResult<Option<u16>> {
+        if let Some(existing) = self.upvalues.iter().position(|u| u.name == name) {
+            return Ok(Some(existing as u16));
+        }
+        let Some(parent_ptr) = self.parent else {
+            return Ok(None);
+        };
+        // 安全：父编译器存活于调用栈，且此处不与自身借用重叠。
+        let parent = unsafe { &mut *parent_ptr };
+        if let Some(slot) = parent.scope.resolve(name) {
+            let index = self.upvalues.len() as u16;
+            self.upvalues.push(UpvalueDesc {
+                name: name.to_string(),
+                from_local: true,
+                index: slot,
+            });
+            Ok(Some(index))
+        } else if let Some(parent_up) = parent.resolve_upvalue(name)? {
+            let index = self.upvalues.len() as u16;
+            self.upvalues.push(UpvalueDesc {
+                name: name.to_string(),
+                from_local: false,
+                index: parent_up,
+            });
+            Ok(Some(index))
+        } else {
+            Ok(None)
+        }
     }
 }
 

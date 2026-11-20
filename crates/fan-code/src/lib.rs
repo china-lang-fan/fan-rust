@@ -54,6 +54,7 @@ mod tests {
                 params: vec!["数".to_string()],
                 body: fn_body.build(),
                 upvalues: vec![UpvalueDesc {
+                    name: "外层".to_string(),
                     from_local: true,
                     index: 0,
                 }],

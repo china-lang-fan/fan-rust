@@ -14,6 +14,7 @@ use fan_object::{Builtin, Object, Runtime};
 
 use crate::error::{VmError, VmResult};
 use crate::frame::Frame;
+use crate::upvalue::Upvalue;
 use crate::value::const_to_object;
 use crate::vm_function::VmFunctionRegistry;
 
@@ -118,11 +119,7 @@ impl<'m> Vm<'m> {
                         .pop()
                         .ok_or_else(|| VmError::new("StoreLocal 时值栈为空"))?;
                     let base = self.frames.last().expect("帧存在").slot_base;
-                    let target = base + idx;
-                    if target >= self.slots.len() {
-                        self.slots.resize(target + 1, Object::Nil);
-                    }
-                    self.slots[target] = value;
+                    self.set_slot(base, idx, value);
                 }
                 Opcode::LoadGlobal(_) => {
                     let idx = self.read_u16(&chunk)? as usize;
@@ -167,14 +164,39 @@ impl<'m> Vm<'m> {
                 }
                 Opcode::MakeClosure(_) => {
                     let index = self.read_u16(&chunk)?;
-                    let name = self
+                    let func = self
                         .module
                         .functions
                         .get(index as usize)
-                        .map(|f| f.name.clone())
-                        .unwrap_or_else(|| "<未知函数>".to_string());
-                    let value = self.functions.make_closure(index, &name);
+                        .cloned()
+                        .ok_or_else(|| VmError::new(format!("函数表索引 {index} 越界")))?;
+                    // 按编译期描述逐个解析 upvalue：来自外层局部槽则取/建 open 句柄，
+                    // 来自外层 upvalue 则直接复用同一句柄，保证跨层共享同一存储。
+                    let mut upvalues: Vec<Upvalue> = Vec::with_capacity(func.upvalues.len());
+                    for desc in &func.upvalues {
+                        let upvalue = if desc.from_local {
+                            self.capture_local(desc.index)?
+                        } else {
+                            self.capture_upvalue(desc.index)?
+                        };
+                        upvalues.push(upvalue);
+                    }
+                    let value = self.functions.make_closure(index, &func.name, upvalues);
                     self.stack.push(value);
+                }
+                Opcode::LoadUpvalue(_) => {
+                    let idx = self.read_u16(&chunk)? as usize;
+                    let cell = self.frame_upvalue(idx)?;
+                    self.stack.push(cell.borrow().clone());
+                }
+                Opcode::StoreUpvalue(_) => {
+                    let idx = self.read_u16(&chunk)? as usize;
+                    let value = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| VmError::new("StoreUpvalue 时值栈为空"))?;
+                    let cell = self.frame_upvalue(idx)?;
+                    *cell.borrow_mut() = value;
                 }
                 Opcode::Call(_) => {
                     let argc = self.read_u8(&chunk)? as usize;
@@ -331,8 +353,10 @@ impl<'m> Vm<'m> {
             .pop()
             .ok_or_else(|| VmError::new("Call 时缺少可调用对象"))?;
         let args = self.pop_args(argc)?;
-        if let Some(index) = self.functions.lookup(&callee) {
-            self.invoke_bytecode_function(index, args)?;
+        if let Some(closure) = self.functions.lookup(&callee) {
+            let index = closure.function_index;
+            let upvalues = closure.upvalues.clone();
+            self.invoke_bytecode_function(index, upvalues, args)?;
             return Ok(());
         }
         match callee {
@@ -359,7 +383,12 @@ impl<'m> Vm<'m> {
         Ok(())
     }
 
-    fn invoke_bytecode_function(&mut self, index: u16, args: Vec<Object>) -> VmResult<()> {
+    fn invoke_bytecode_function(
+        &mut self,
+        index: u16,
+        upvalues: Vec<Upvalue>,
+        args: Vec<Object>,
+    ) -> VmResult<()> {
         let func = &self.module.functions[index as usize];
         let fixed = func.arity.fixed;
         let variadic = func.arity.variadic;
@@ -392,9 +421,22 @@ impl<'m> Vm<'m> {
             };
             self.slots.push(Object::array(rest));
         }
-        self.frames.push(Frame::function(index, base, args.len()));
+        let mut frame = Frame::function(index, base, args.len());
+        // 闭包携带的 upvalue 作为本帧 upvalue 槽的前缀，Load/StoreUpvalue 按索引访问。
+        // 这些句柄来自外层，abs_pos 用哨兵标记，帧退出时不做关闭处理。
+        frame.open_upvalues = upvalues.into_iter().map(|up| (usize::MAX, up)).collect();
+        self.frames.push(frame);
         let result = self.execute()?;
-        self.frames.pop();
+        let mut finished = self.frames.pop().expect("函数帧存在");
+        // 关闭本帧创建的 open upvalue（abs_pos 非哨兵）：把对应局部槽当前值搬进
+        // cell，使闭包在槽位回收后仍持有该变量；来自外层的入参 upvalue 原样保留。
+        for (abs_pos, upvalue) in finished.open_upvalues.drain(..) {
+            if abs_pos != usize::MAX {
+                if let Some(value) = self.slots.get(abs_pos).cloned() {
+                    *upvalue.borrow_mut() = value;
+                }
+            }
+        }
         // 回收本帧槽位。
         self.slots.truncate(base);
         self.stack.push(result);
@@ -417,13 +459,59 @@ impl<'m> Vm<'m> {
             .unwrap_or(Object::Nil)
     }
 
-    /// 写入当前帧槽位，槽位不足时扩展。
+    /// 写入当前帧槽位，槽位不足时扩展；若该槽已被闭包以 open upvalue 捕获，
+    /// 同步刷新共享 cell，使帧内赋值对所有持有该 upvalue 的闭包立即可见。
     fn set_slot(&mut self, frame_base: usize, slot: usize, value: Object) {
         let target = frame_base + slot;
         if target >= self.slots.len() {
             self.slots.resize(target + 1, Object::Nil);
         }
-        self.slots[target] = value;
+        self.slots[target] = value.clone();
+        if let Some(frame) = self.frames.last() {
+            let linked: Vec<Upvalue> = frame
+                .open_upvalues
+                .iter()
+                .filter(|(pos, _)| *pos == target)
+                .map(|(_, up)| Rc::clone(up))
+                .collect();
+            for up in linked {
+                *up.borrow_mut() = value.clone();
+            }
+        }
+    }
+
+    /// 取当前帧的第 `idx` 个 upvalue 句柄（含闭包入参与本帧新建的 open upvalue）。
+    fn frame_upvalue(&self, idx: usize) -> VmResult<Upvalue> {
+        let frame = self.frames.last().ok_or_else(|| VmError::new("无调用帧"))?;
+        frame
+            .open_upvalues
+            .get(idx)
+            .map(|(_, up)| Rc::clone(up))
+            .ok_or_else(|| VmError::new(format!("upvalue 索引 {idx} 越界")))
+    }
+
+    /// 捕获当前帧的局部槽 `slot`：若已有 open 句柄则复用，否则新建并登记。
+    ///
+    /// 复用保证同一槽位被多个闭包捕获时共享同一个 cell，写入彼此可见。
+    fn capture_local(&mut self, slot: u16) -> VmResult<Upvalue> {
+        let frame = self
+            .frames
+            .last_mut()
+            .ok_or_else(|| VmError::new("无调用帧"))?;
+        let base = frame.slot_base;
+        let abs_pos = base + slot as usize;
+        if let Some((_, up)) = frame.open_upvalues.iter().find(|(pos, _)| *pos == abs_pos) {
+            return Ok(Rc::clone(up));
+        }
+        let initial = self.slots.get(abs_pos).cloned().unwrap_or(Object::Nil);
+        let up: Upvalue = Rc::new(RefCell::new(initial));
+        frame.open_upvalues.push((abs_pos, Rc::clone(&up)));
+        Ok(up)
+    }
+
+    /// 复用当前帧已有的第 `idx` 个 upvalue 句柄（跨多层嵌套时透传）。
+    fn capture_upvalue(&self, idx: u16) -> VmResult<Upvalue> {
+        self.frame_upvalue(idx as usize)
     }
 
     /// 下标读取，语义对齐树遍历求值器：数组按整数下标、字符串产字符、

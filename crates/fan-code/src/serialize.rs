@@ -230,12 +230,14 @@ impl Arity {
 
 impl UpvalueDesc {
     fn write(&self, w: &mut Writer) {
+        w.string(&self.name);
         w.bool(self.from_local);
         w.u16(self.index);
     }
 
     fn read(r: &mut Reader) -> CodeResult<UpvalueDesc> {
         Ok(UpvalueDesc {
+            name: r.string()?,
             from_local: r.bool()?,
             index: r.u16()?,
         })

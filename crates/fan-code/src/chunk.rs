@@ -9,7 +9,7 @@ use crate::opcode::Opcode;
 /// 魔数：凡语言编译产物（`.fanc` / `.凡码`）的文件头标识。
 pub const MAGIC: [u8; 4] = *b"FANC";
 /// 字节码格式版本。破坏性变更时 +1，旧产物将被拒绝并回退源码重编译。
-pub const BYTECODE_VERSION: u16 = 1;
+pub const BYTECODE_VERSION: u16 = 2;
 /// 项目清单文件名，用于上溯定位项目根（与 fan-mod 的约定保持一致）。
 pub const MANIFEST_MARKER: &str = "fan.toml";
 
@@ -50,6 +50,8 @@ pub struct Chunk {
 /// 闭包捕获的上层变量描述。
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpvalueDesc {
+    /// 被捕获变量的源码名，仅用于编译期去重，运行期按索引访问。
+    pub name: String,
     /// true 表示捕获自直接外层帧的局部槽位；false 表示捕获自外层的 upvalue。
     pub from_local: bool,
     /// 局部槽位索引或外层 upvalue 索引。

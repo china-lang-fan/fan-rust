@@ -11,6 +11,7 @@
 mod error;
 mod frame;
 mod ops;
+mod upvalue;
 mod value;
 mod vm;
 mod vm_function;
@@ -339,5 +340,45 @@ mod tests {
         let (program, _) = parse_program("继续");
         let result = compile_program(&program);
         assert!(result.is_err_and(|msg| msg.contains("继续")));
+    }
+
+    #[test]
+    fn 闭包捕获外层变量并在帧返回后保持() {
+        let src = "函数 造计数器()\n  变量 数 = 0\n  函数 增加()\n    数 = 数 加 1\n    返回 数\n  结束\n  返回 增加\n结束\n\
+                   变量 计数 = 造计数器()\n计数()";
+        assert_eq!(run_source(src).unwrap(), Object::Int(1));
+        // 同一闭包多次调用，upvalue 状态持续累积。
+        let src2 = "函数 造计数器()\n  变量 数 = 0\n  函数 增加()\n    数 = 数 加 1\n    返回 数\n  结束\n  返回 增加\n结束\n\
+                    变量 计数 = 造计数器()\n计数()\n计数()\n计数()";
+        assert_eq!(run_source(src2).unwrap(), Object::Int(3));
+    }
+
+    #[test]
+    fn 两个闭包实例各自独立持有upvalue() {
+        let src = "函数 造计数器()\n  变量 数 = 0\n  函数 增加()\n    数 = 数 加 1\n    返回 数\n  结束\n  返回 增加\n结束\n\
+                   变量 甲 = 造计数器()\n变量 乙 = 造计数器()\n甲()\n甲()\n乙()";
+        assert_eq!(run_source(src).unwrap(), Object::Int(1));
+    }
+
+    #[test]
+    fn 多个闭包共享同一可变upvalue() {
+        let src = "函数 造对()\n  变量 共享 = 10\n  函数 读()\n    返回 共享\n  结束\n\
+                   函数 写(整数 值)\n    共享 = 值\n  结束\n  返回 读, 写\n结束\n\
+                   变量 读、写 = 造对()\n写(99)\n读()";
+        assert_eq!(run_source(src).unwrap(), Object::Int(99));
+    }
+
+    #[test]
+    fn 跨多层嵌套捕获参数与局部() {
+        let src = "函数 外层(整数 基数)\n  函数 中层()\n    函数 内层(整数 增量)\n      返回 基数 加 增量\n    结束\n    返回 内层\n  结束\n  返回 中层()\n结束\n\
+                   变量 加五 = 外层(5)\n加五(10)";
+        assert_eq!(run_source(src).unwrap(), Object::Int(15));
+    }
+
+    #[test]
+    fn 闭包读取外层变量不修改时仍可访问() {
+        let src = "函数 配()\n  变量 前缀 = 100\n  函数 取(整数 偏移)\n    返回 前缀 加 偏移\n  结束\n  返回 取\n结束\n\
+                   变量 取 = 配()\n取(23)";
+        assert_eq!(run_source(src).unwrap(), Object::Int(123));
     }
 }

@@ -1,5 +1,7 @@
 //! 虚拟机调用帧：一次函数/模块执行的指令游标与局部槽位。
 
+use crate::upvalue::Upvalue;
+
 /// 一帧对应一个可执行块（模块入口或函数体）。
 #[derive(Debug)]
 pub struct Frame {
@@ -11,6 +13,9 @@ pub struct Frame {
     pub slot_base: usize,
     /// 实际收到的实参个数（模块入口为 0），供默认参数缺省判定读取。
     pub argc: usize,
+    /// 本帧创建的 open upvalue，按本帧局部槽的绝对位置登记。
+    /// 帧返回时统一关闭（把槽位当前值搬进 cell），使闭包在帧销毁后仍可读写。
+    pub open_upvalues: Vec<(usize, Upvalue)>,
 }
 
 impl Frame {
@@ -23,6 +28,7 @@ impl Frame {
             ip: 0,
             slot_base,
             argc: 0,
+            open_upvalues: Vec::new(),
         }
     }
 
@@ -33,6 +39,7 @@ impl Frame {
             ip: 0,
             slot_base,
             argc,
+            open_upvalues: Vec::new(),
         }
     }
 }
