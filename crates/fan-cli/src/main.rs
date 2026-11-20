@@ -711,10 +711,19 @@ mod tests {
     }
 
     #[test]
-    fn vm遇到不支持的语法返回明确错误() {
-        // 数组字面量展开（...）尚未在字节码编译器支持，应给“暂不支持”错误而非 panic。
-        let err = run_engine_captured("变量 甲 = [1]\n变量 乙 = [...甲]\n打印行(乙)\n", Engine::Vm)
-            .unwrap_err();
+    fn vm数组字面量展开已支持并与tree一致() {
+        // 数组字面量展开（...）已在字节码编译器支持，双引擎结果应一致。
+        assert_engines_agree("变量 甲 = [1, 2]\n变量 乙 = [0, ...甲, 3]\n打印行(乙)\n");
+    }
+
+    #[test]
+    fn vm遇到仍不支持的语法返回明确错误() {
+        // 接口定义尚未在字节码编译器支持，应给“暂不支持”错误而非 panic。
+        let err = run_engine_captured(
+            "接口 说话者\n 方法 说话() -> 字符串\n结束\n",
+            Engine::Vm,
+        )
+        .unwrap_err();
         assert!(err.contains("暂不支持"), "实际：{err}");
     }
 

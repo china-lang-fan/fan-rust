@@ -132,7 +132,8 @@ impl ChunkBuilder {
             | Opcode::LoadModule(v)
             | Opcode::BinOp(v)
             | Opcode::UnaryOp(v)
-            | Opcode::UnpackTuple(v) => self.chunk.code.extend_from_slice(&v.to_le_bytes()),
+            | Opcode::UnpackTuple(v)
+            | Opcode::CallNativeMarked(v) => self.chunk.code.extend_from_slice(&v.to_le_bytes()),
             Opcode::Jump(v) | Opcode::JumpIfFalse(v) | Opcode::JumpIfTrue(v) => {
                 self.chunk.code.extend_from_slice(&v.to_le_bytes())
             }
@@ -154,7 +155,13 @@ impl ChunkBuilder {
             | Opcode::CallIfFunc
             | Opcode::ArgCount
             | Opcode::GetSlice
-            | Opcode::ToStr => {}
+            | Opcode::ToStr
+            | Opcode::PushMark
+            | Opcode::Spread
+            | Opcode::SpreadDict
+            | Opcode::BuildArrayMarked
+            | Opcode::BuildDictMarked
+            | Opcode::CallMarked => {}
             Opcode::ForStep(tag, iterable, counter, elem, index_slot) => {
                 self.chunk.code.push(*tag);
                 self.chunk.code.extend_from_slice(&iterable.to_le_bytes());

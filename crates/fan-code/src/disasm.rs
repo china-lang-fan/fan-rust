@@ -67,6 +67,13 @@ fn decode_instruction(code: &[u8], start: usize) -> Result<(Opcode, usize), Stri
         }
         Opcode::GetSlice => Opcode::GetSlice,
         Opcode::ToStr => Opcode::ToStr,
+        Opcode::PushMark => Opcode::PushMark,
+        Opcode::Spread => Opcode::Spread,
+        Opcode::SpreadDict => Opcode::SpreadDict,
+        Opcode::BuildArrayMarked => Opcode::BuildArrayMarked,
+        Opcode::BuildDictMarked => Opcode::BuildDictMarked,
+        Opcode::CallMarked => Opcode::CallMarked,
+        Opcode::CallNativeMarked(_) => Opcode::CallNativeMarked(u16_at(0)),
     };
     Ok((op, 1 + operand_size))
 }
@@ -128,6 +135,13 @@ fn render(op: &Opcode, chunk: &Chunk) -> String {
         ),
         Opcode::GetSlice => "GET_SLICE".to_string(),
         Opcode::ToStr => "TO_STR".to_string(),
+        Opcode::PushMark => "PUSH_MARK".to_string(),
+        Opcode::Spread => "SPREAD".to_string(),
+        Opcode::SpreadDict => "SPREAD_DICT".to_string(),
+        Opcode::BuildArrayMarked => "BUILD_ARRAY_MARKED".to_string(),
+        Opcode::BuildDictMarked => "BUILD_DICT_MARKED".to_string(),
+        Opcode::CallMarked => "CALL_MARKED".to_string(),
+        Opcode::CallNativeMarked(i) => format!("CALL_NATIVE_MARKED {i} ；{}", const_str(*i)),
         other => format!("{other:?}"),
     }
 }

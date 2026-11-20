@@ -102,6 +102,20 @@ pub enum Opcode {
     GetSlice = 37,
     /// 弹出栈顶值，按 inspect 文本规则转为字符串压栈（插值字符串用）。
     ToStr = 38,
+    /// 把当前值栈长度压入 VM 的标记栈（展开 `...` 构建数组/字典/调用实参的边界）。
+    PushMark = 39,
+    /// 弹出栈顶数组，把其元素按原顺序逐个压回值栈（仅支持数组，对齐 tree spread_elements）。
+    Spread = 40,
+    /// 弹出栈顶字典，把其键值对按 key、value 顺序逐个压回值栈（字典字面量展开）。
+    SpreadDict = 41,
+    /// 从标记栈顶记录的边界切出值栈元素，构建数组压栈，并弹出该标记。
+    BuildArrayMarked = 42,
+    /// 从标记栈顶记录的边界切出键值序列，构建字典压栈（后写覆盖同名键），并弹出该标记。
+    BuildDictMarked = 43,
+    /// 调用栈顶可调用对象：实参个数由标记栈顶边界运行期计算（支持实参展开），随后弹出标记。
+    CallMarked = 44,
+    /// 原生调用的展开版本：原生 spec 名取常量池 `[u16]`，实参个数由标记边界运行期计算。
+    CallNativeMarked(u16) = 45,
 }
 
 /// [`Opcode::ForStep`] 的可迭代对象类型标签。
@@ -128,7 +142,13 @@ impl Opcode {
             | Opcode::CallIfFunc
             | Opcode::ArgCount
             | Opcode::GetSlice
-            | Opcode::ToStr => 0,
+            | Opcode::ToStr
+            | Opcode::PushMark
+            | Opcode::Spread
+            | Opcode::SpreadDict
+            | Opcode::BuildArrayMarked
+            | Opcode::BuildDictMarked
+            | Opcode::CallMarked => 0,
 
             Opcode::Const(_)
             | Opcode::LoadLocal(_)
@@ -146,7 +166,8 @@ impl Opcode {
             | Opcode::LoadModule(_)
             | Opcode::BinOp(_)
             | Opcode::UnaryOp(_)
-            | Opcode::UnpackTuple(_) => 2,
+            | Opcode::UnpackTuple(_)
+            | Opcode::CallNativeMarked(_) => 2,
 
             Opcode::Jump(_) | Opcode::JumpIfFalse(_) | Opcode::JumpIfTrue(_) => 4,
 
@@ -207,6 +228,13 @@ impl Opcode {
             36 => Some(Opcode::ForStep(0, 0, 0, 0, 0)),
             37 => Some(Opcode::GetSlice),
             38 => Some(Opcode::ToStr),
+            39 => Some(Opcode::PushMark),
+            40 => Some(Opcode::Spread),
+            41 => Some(Opcode::SpreadDict),
+            42 => Some(Opcode::BuildArrayMarked),
+            43 => Some(Opcode::BuildDictMarked),
+            44 => Some(Opcode::CallMarked),
+            45 => Some(Opcode::CallNativeMarked(0)),
             _ => None,
         }
     }

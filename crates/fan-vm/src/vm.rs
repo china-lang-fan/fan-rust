@@ -34,6 +34,8 @@ pub struct Vm<'m> {
     runtime: Rc<RefCell<Runtime>>,
     frames: Vec<Frame>,
     stack: Vec<Object>,
+    /// 展开 `...` 的边界标记：记录压入标记时刻的值栈长度，供 Marked 系列指令结算。
+    marks: Vec<usize>,
     /// 每帧独立的局部槽位区，按帧槽位基址切片。
     slots: Vec<Object>,
     globals: HashMap<String, Object>,
@@ -55,6 +57,7 @@ impl<'m> Vm<'m> {
             runtime,
             frames: Vec::new(),
             stack: Vec::new(),
+            marks: Vec::new(),
             slots: Vec::new(),
             globals: HashMap::new(),
             functions: VmFunctionRegistry::shared(),
@@ -394,6 +397,84 @@ impl<'m> Vm<'m> {
                 Opcode::ToStr => {
                     let value = self.pop_operand()?;
                     self.stack.push(Object::string(value.inspect()));
+                }
+                Opcode::PushMark => {
+                    self.marks.push(self.stack.len());
+                }
+                Opcode::Spread => {
+                    let value = self.pop_operand()?;
+                    let Object::Array(arr) = value else {
+                        return Err(VmError::new(format!(
+                            "展开 ... 仅支持数组，实际是 {}",
+                            value.kind()
+                        )));
+                    };
+                    for element in arr.elements() {
+                        self.stack.push(element);
+                    }
+                }
+                Opcode::SpreadDict => {
+                    let value = self.pop_operand()?;
+                    let Object::Dict(dict) = value else {
+                        return Err(VmError::new(format!(
+                            "字典展开 ... 仅支持字典，实际是 {}",
+                            value.kind()
+                        )));
+                    };
+                    // 按 key、value 顺序压回，供 BuildDictMarked 成对消费。
+                    for key in dict.keys() {
+                        let val = dict.get(&key).unwrap_or(Object::Nil);
+                        self.stack.push(key);
+                        self.stack.push(val);
+                    }
+                }
+                Opcode::BuildArrayMarked => {
+                    let Some(mark) = self.marks.pop() else {
+                        return Err(VmError::new("BuildArrayMarked 缺少配对的压入标记"));
+                    };
+                    if mark > self.stack.len() {
+                        return Err(VmError::new("数组构建标记超出值栈深度"));
+                    }
+                    let elements = self.stack.split_off(mark);
+                    self.stack.push(Object::array(elements));
+                }
+                Opcode::BuildDictMarked => {
+                    let Some(mark) = self.marks.pop() else {
+                        return Err(VmError::new("BuildDictMarked 缺少配对的压入标记"));
+                    };
+                    if mark > self.stack.len() {
+                        return Err(VmError::new("字典构建标记超出值栈深度"));
+                    }
+                    let entries = self.stack.split_off(mark);
+                    if !entries.len().is_multiple_of(2) {
+                        return Err(VmError::new("字典构建的键值必须成对出现"));
+                    }
+                    let mut dict = fan_object::FanDict::new();
+                    let mut i = 0;
+                    while i < entries.len() {
+                        let key = entries[i].clone();
+                        let value = entries[i + 1].clone();
+                        if !key.is_dict_key() {
+                            return Err(VmError::new(format!(
+                                "不支持的字典键类型：{}",
+                                key.kind()
+                            )));
+                        }
+                        dict.set(key, value);
+                        i += 2;
+                    }
+                    self.stack.push(Object::Dict(dict));
+                }
+                Opcode::CallMarked => {
+                    // 标记在 callee 压栈前记录，栈布局为 [实参…, callee]，故实参数 = 标记后槽位 - 1。
+                    let argc = self.take_marked_count()? - 1;
+                    self.call_value(argc)?;
+                }
+                Opcode::CallNativeMarked(_) => {
+                    let idx = self.read_u16(&chunk)? as usize;
+                    let name = self.string_const(&chunk, idx)?;
+                    let argc = self.take_marked_count()?;
+                    self.call_native(&name, argc)?;
                 }
                 Opcode::LoadModule(_) => {
                     let idx = self.read_u16(&chunk)? as usize;
@@ -905,6 +986,18 @@ impl<'m> Vm<'m> {
         }
         let at = self.stack.len() - argc;
         Ok(self.stack.split_off(at))
+    }
+
+    /// 弹出标记栈顶边界，返回自该边界起压入的实参个数（用于展开调用的运行期计数）。
+    fn take_marked_count(&mut self) -> VmResult<usize> {
+        let mark = self
+            .marks
+            .pop()
+            .ok_or_else(|| VmError::new("展开调用缺少配对的压入标记"))?;
+        if mark > self.stack.len() {
+            return Err(VmError::new("调用标记超出值栈深度"));
+        }
+        Ok(self.stack.len() - mark)
     }
 
     fn pop_operand(&mut self) -> VmResult<Object> {

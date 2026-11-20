@@ -524,4 +524,77 @@ mod tests {
         let src5 = "变量 s = \"a\"\ns += \"b\"\ns";
         assert_eq!(run_source(src5).unwrap(), Object::string("ab"));
     }
+
+    #[test]
+    fn 数组字面量展开与拼接() {
+        let src = "变量 前 = [1, 2]\n变量 后 = [4, 5]\n[0, ...前, 3, ...后]";
+        assert_eq!(
+            run_source(src).unwrap(),
+            Object::array(vec![
+                Object::Int(0),
+                Object::Int(1),
+                Object::Int(2),
+                Object::Int(3),
+                Object::Int(4),
+                Object::Int(5),
+            ])
+        );
+        let src2 = "变量 数列 = [3, 1, 4]\n[...数列]";
+        assert_eq!(
+            run_source(src2).unwrap(),
+            Object::array(vec![Object::Int(3), Object::Int(1), Object::Int(4)])
+        );
+    }
+
+    #[test]
+    fn 调用实参展开传入可变参数() {
+        let src = "函数 求和(整数... 数)\n 变量 总 = 0\n\
+                    遍历 数 中的 n\n 总 = 总 加 n\n结束\n 返回 总\n结束\n\
+                    求和(...[1, 2, 3], ...[4, 5])";
+        assert_eq!(run_source(src).unwrap(), Object::Int(15));
+    }
+
+    #[test]
+    fn 字典字面量展开后写覆盖同名键() {
+        let src = "变量 基础 = {\"a\": 1, \"b\": 2}\n\
+                    变量 覆盖 = {\"b\": 9, \"c\": 3}\n\
+                    变量 合并 = {...基础, ...覆盖}\n\
+                    合并[\"b\"]";
+        assert_eq!(run_source(src).unwrap(), Object::Int(9));
+        let src2 = "变量 基础 = {\"a\": 1, \"b\": 2}\n\
+                    变量 覆盖 = {\"b\": 9, \"c\": 3}\n\
+                    ({...基础, ...覆盖})[\"a\"]";
+        assert_eq!(run_source(src2).unwrap(), Object::Int(1));
+    }
+
+    #[test]
+    fn 顶层函数提升支持前置引用() {
+        // 跑测试 定义在前、求和函数 定义在后，但调用发生在所有顶层声明完成之后，
+        // 函数提升应使前置引用解析到正确槽位，与 tree 模块作用域一致。
+        let src = "函数 跑测试()\n 返回 求和函数(...[1, 2], ...[3, 4])\n结束\n\
+                    函数 求和函数(整数... 数)\n 变量 总 = 0\n\
+                    遍历 数 中的 n\n 总 = 总 加 n\n结束\n 返回 总\n结束\n\
+                    跑测试()";
+        assert_eq!(run_source(src).unwrap(), Object::Int(10));
+    }
+
+    #[test]
+    fn 隐式接收者调用等价点成员调用() {
+        // `包 算(21)` 等价于 `包.算(21)`：取接收者的同名成员函数后以显式实参调用。
+        // 隐式接收者调用由 parser 在顶层表达式语句识别，故被测调用置于末行。
+        let src = "函数 翻倍(整数 x)\n 返回 x 乘 2\n结束\n\
+                    变量 包 = {\"算\": 翻倍}\n\
+                    包 算(21)\n";
+        assert_eq!(run_source(src).unwrap(), Object::Int(42));
+    }
+
+    #[test]
+    fn 通过表达式在模块作用域内解析裸名() {
+        // 通过 工具 加倍(3)：裸名 加倍 解析为模块 工具 的导出成员后调用。
+        let src = "变量 工具 = {}\n\
+                    函数 加倍(整数 x)\n 返回 x 乘 2\n结束\n\
+                    工具.加倍 = 加倍\n\
+                    通过 工具 加倍(21)\n";
+        assert_eq!(run_source(src).unwrap(), Object::Int(42));
+    }
 }

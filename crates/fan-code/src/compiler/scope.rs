@@ -74,6 +74,17 @@ impl ScopeTracker {
         None
     }
 
+    /// 声明名字；若根作用域已存在同名（函数提升预声明），复用其槽位而不重新分配。
+    ///
+    /// 仅用于顶层函数提升：预扫描先在根作用域占槽，正式编译到该声明时命中复用，
+    /// 保证前置引用与实际赋值落在同一槽位。
+    pub fn declare_or_reuse_root(&mut self, name: &str) -> u16 {
+        if let Some(slot) = self.resolve(name) {
+            return slot;
+        }
+        self.declare(name)
+    }
+
     /// 导出根作用域（模块入口顶层）的「名字 → 槽位」映射，
     /// 供装配层在执行模块入口后按名回收顶层绑定（模块导出）。
     pub fn root_slots(&self) -> Vec<(String, u16)> {

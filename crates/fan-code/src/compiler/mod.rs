@@ -30,6 +30,9 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
     let imports = Rc::new(RefCell::new(Vec::new()));
     let native_aliases = Rc::new(RefCell::new(HashMap::new()));
     let mut compiler = Compiler::new(functions, exports, imports, native_aliases);
+    // 函数提升：预扫描顶层函数声明，先在根作用域占槽，使前置引用（后定义的函数
+    // 在更早的函数体内被调用）能解析到同一局部槽，与 tree 求值器的模块作用域对齐。
+    compiler.predeclare_top_level_functions(&program.statements);
     compiler.compile_statements(&program.statements)?;
     // 入口块以 Halt 收尾，停机时值栈顶即顶层最后一个表达式结果（若有）。
     compiler.builder.emit(Opcode::Halt);
@@ -75,6 +78,8 @@ struct Compiler<'p> {
     in_module: bool,
     /// 嵌套循环的跳转信息栈：`(break 目标待回填偏移, continue 目标待回填偏移)`。
     loops: Vec<LoopCtx>,
+    /// `通过 模块 表达式` 的模块别名栈：编译内部表达式期间，裸标识符改走该模块成员。
+    through_modules: Vec<String>,
 }
 
 /// 一个循环的控制流回填点。
@@ -104,6 +109,7 @@ impl<'p> Compiler<'p> {
             params: Vec::new(),
             in_module: true,
             loops: Vec::new(),
+            through_modules: Vec::new(),
         }
     }
 
@@ -133,6 +139,25 @@ impl<'p> Compiler<'p> {
             self.compile_stmt(stmt)?;
         }
         Ok(())
+    }
+
+    /// 预扫描顶层语句，把函数声明（含 `公开` 可见性包裹、`定义 本地` 原生绑定）
+    /// 的名字提前在根作用域占槽，实现模块级函数提升。
+    fn predeclare_top_level_functions(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::VarDecl(d) => {
+                    if matches!(&d.value, Some(Expr::Function(_))) {
+                        self.scope.declare_or_reuse_root(&d.name);
+                    }
+                }
+                // 公开 等可见性包裹内部声明。
+                Stmt::Visibility(v) => {
+                    self.predeclare_top_level_functions(std::slice::from_ref(&v.inner))
+                }
+                _ => {}
+            }
+        }
     }
 
     fn compile_stmt(&mut self, stmt: &Stmt) -> CompileResult<()> {
@@ -178,10 +203,11 @@ impl<'p> Compiler<'p> {
                         self.builder.emit(Opcode::StoreUpvalue(up));
                         return Ok(());
                     }
-                    let slot = self.scope.declare(&d.name);
+                    let slot = self.scope.declare_or_reuse_root(&d.name);
                     self.builder.emit(Opcode::StoreLocal(slot));
                 } else {
-                    let slot = self.scope.declare(&d.name);
+                    // 函数提升可能已在根作用域预占同名槽，此处复用而非重新分配。
+                    let slot = self.scope.declare_or_reuse_root(&d.name);
                     self.builder.emit(Opcode::StoreLocal(slot));
                 }
                 if matches!(d.visibility, fan_ast::stmt::Visibility::Public) {
@@ -668,6 +694,8 @@ impl<'p> Compiler<'p> {
                 }
             }
             Expr::Call(call) => self.compile_call(call),
+            Expr::Through(t) => self.compile_through(t),
+            Expr::ImplicitReceiverCall(c) => self.compile_implicit_receiver_call(c),
             Expr::MaybeCall(maybe) => {
                 self.line(maybe.pos.line as u32);
                 self.compile_expr(&maybe.callee)?;
@@ -696,27 +724,56 @@ impl<'p> Compiler<'p> {
             }
             Expr::Array(a) => {
                 self.line(a.pos.line as u32);
-                for element in &a.elements {
-                    if let fan_ast::expr::Expr::Spread(_) = element {
-                        return Err("字节码编译器暂不支持数组字面量展开（...）".to_string());
+                let has_spread = a
+                    .elements
+                    .iter()
+                    .any(|e| matches!(e, fan_ast::expr::Expr::Spread(_)));
+                if has_spread {
+                    // 含展开：压标记后逐项编译，展开项发 Spread 摊平，最后按标记结算数组。
+                    self.builder.emit(Opcode::PushMark);
+                    for element in &a.elements {
+                        if let fan_ast::expr::Expr::Spread(s) = element {
+                            self.compile_expr(&s.value)?;
+                            self.builder.emit(Opcode::Spread);
+                        } else {
+                            self.compile_expr(element)?;
+                        }
                     }
-                    self.compile_expr(element)?;
+                    self.builder.emit(Opcode::BuildArrayMarked);
+                } else {
+                    for element in &a.elements {
+                        self.compile_expr(element)?;
+                    }
+                    self.builder
+                        .emit(Opcode::BuildArray(a.elements.len() as u16));
                 }
-                self.builder
-                    .emit(Opcode::BuildArray(a.elements.len() as u16));
                 Ok(())
             }
             Expr::Dict(d) => {
                 self.line(d.pos.line as u32);
-                for pair in &d.pairs {
-                    if pair.spread {
-                        return Err("字节码编译器暂不支持字典字面量展开（...）".to_string());
+                let has_spread = d.pairs.iter().any(|p| p.spread);
+                if has_spread {
+                    // 含字典展开：压标记，普通项按键值压栈，展开项发 SpreadDict 摊平。
+                    self.builder.emit(Opcode::PushMark);
+                    for pair in &d.pairs {
+                        if pair.spread {
+                            self.compile_expr(&pair.value)?;
+                            self.builder.emit(Opcode::SpreadDict);
+                        } else {
+                            let key = pair.key.as_ref().expect("非展开字典项必须有键表达式");
+                            self.compile_expr(key)?;
+                            self.compile_expr(&pair.value)?;
+                        }
                     }
-                    let key = pair.key.as_ref().expect("非展开字典项必须有键表达式");
-                    self.compile_expr(key)?;
-                    self.compile_expr(&pair.value)?;
+                    self.builder.emit(Opcode::BuildDictMarked);
+                } else {
+                    for pair in &d.pairs {
+                        let key = pair.key.as_ref().expect("非展开字典项必须有键表达式");
+                        self.compile_expr(key)?;
+                        self.compile_expr(&pair.value)?;
+                    }
+                    self.builder.emit(Opcode::BuildDict(d.pairs.len() as u16));
                 }
-                self.builder.emit(Opcode::BuildDict(d.pairs.len() as u16));
                 Ok(())
             }
             Expr::Index(idx) => {
@@ -763,33 +820,107 @@ impl<'p> Compiler<'p> {
             None
         };
         if let Some(spec) = native_spec {
+            let has_spread = call
+                .args
+                .iter()
+                .any(|a| matches!(a, fan_ast::expr::Expr::Spread(_)));
+            if has_spread {
+                self.builder.emit(Opcode::PushMark);
+                for arg in &call.args {
+                    match arg {
+                        fan_ast::expr::Expr::Spread(s) => {
+                            self.compile_expr(&s.value)?;
+                            self.builder.emit(Opcode::Spread);
+                        }
+                        other => self.compile_expr(other)?,
+                    }
+                }
+                let spec_idx = self.add_string_const(&spec);
+                self.builder.emit(Opcode::CallNativeMarked(spec_idx));
+            } else {
+                for arg in &call.args {
+                    self.compile_expr(arg)?;
+                }
+                let spec_idx = self.add_string_const(&spec);
+                self.builder
+                    .emit(Opcode::CallNative(spec_idx, call.args.len() as u8));
+            }
+            return Ok(());
+        }
+        let has_spread = call
+            .args
+            .iter()
+            .any(|a| matches!(a, fan_ast::expr::Expr::Spread(_)));
+        if has_spread {
+            self.builder.emit(Opcode::PushMark);
             for arg in &call.args {
                 match arg {
-                    fan_ast::expr::Expr::Spread(_) => {
-                        return Err("字节码编译器暂不支持原生调用实参展开（...）".to_string());
+                    fan_ast::expr::Expr::Spread(s) => {
+                        self.compile_expr(&s.value)?;
+                        self.builder.emit(Opcode::Spread);
                     }
                     other => self.compile_expr(other)?,
                 }
             }
-            let spec_idx = self.add_string_const(&spec);
-            self.builder
-                .emit(Opcode::CallNative(spec_idx, call.args.len() as u8));
-            return Ok(());
-        }
-        for arg in &call.args {
-            match arg {
-                fan_ast::expr::Expr::Spread(s) => {
-                    self.compile_expr(&s.value)?;
-                    // M1 子集暂不展开实参，展开在数组里程碑处理。
-                    return Err("字节码编译器暂不支持调用实参展开（...）".to_string());
-                }
-                other => self.compile_expr(other)?,
+            self.compile_expr(&call.callee)?;
+            self.builder.emit(Opcode::CallMarked);
+        } else {
+            for arg in &call.args {
+                self.compile_expr(arg)?;
             }
+            self.compile_expr(&call.callee)?;
+            let argc = call.args.len() as u8;
+            self.builder.emit(Opcode::Call(argc));
         }
-        self.compile_expr(&call.callee)?;
-        let argc = call.args.len() as u8;
-        self.builder.emit(Opcode::Call(argc));
         Ok(())
+    }
+
+    /// 编译隐式接收者调用 `名单 追加 "张三"`，语义等价于 `名单.追加("张三")`：
+    /// 先取接收者的同名成员作为可调用值，再以显式实参（不含接收者）调用。
+    fn compile_implicit_receiver_call(
+        &mut self,
+        c: &fan_ast::expr::ImplicitReceiverCallExpr,
+    ) -> CompileResult<()> {
+        self.line(c.pos.line as u32);
+        let has_spread = c
+            .args
+            .iter()
+            .any(|a| matches!(a, fan_ast::expr::Expr::Spread(_)));
+        if has_spread {
+            self.builder.emit(Opcode::PushMark);
+            for arg in &c.args {
+                match arg {
+                    fan_ast::expr::Expr::Spread(s) => {
+                        self.compile_expr(&s.value)?;
+                        self.builder.emit(Opcode::Spread);
+                    }
+                    other => self.compile_expr(other)?,
+                }
+            }
+            self.compile_expr(&c.receiver)?;
+            let name_idx = self.add_string_const(&c.name);
+            self.builder.emit(Opcode::GetMember(name_idx));
+            self.builder.emit(Opcode::CallMarked);
+        } else {
+            for arg in &c.args {
+                self.compile_expr(arg)?;
+            }
+            self.compile_expr(&c.receiver)?;
+            let name_idx = self.add_string_const(&c.name);
+            self.builder.emit(Opcode::GetMember(name_idx));
+            self.builder.emit(Opcode::Call(c.args.len() as u8));
+        }
+        Ok(())
+    }
+
+    /// 编译 `通过 模块 表达式`：在内部表达式求值期间，把裸标识符解析为该模块的导出
+    /// 成员（模块对象 + GetMember），对齐 tree eval_through 注入模块作用域的语义。
+    fn compile_through(&mut self, t: &fan_ast::expr::ThroughExpr) -> CompileResult<()> {
+        self.line(t.pos.line as u32);
+        self.through_modules.push(t.module_name.clone());
+        let result = self.compile_expr(&t.expr);
+        self.through_modules.pop();
+        result
     }
 
     fn compile_function_literal(&mut self, f: &fan_ast::expr::FunctionLit) -> CompileResult<()> {
@@ -882,7 +1013,9 @@ impl<'p> Compiler<'p> {
 
         // 具名函数同时绑定到当前作用域名，匿名函数仅压栈。
         if !f.name.is_empty() {
-            let slot = self.scope.declare(&f.name);
+            // 顶层函数已在预扫描阶段于根作用域占槽，这里复用同一槽位，避免重复分配
+            // 导致前置引用（函数提升）解析到空槽。
+            let slot = self.scope.declare_or_reuse_root(&f.name);
             self.builder.emit(Opcode::StoreLocal(slot));
             // 绑定后再把函数值留在栈上，保持“声明表达式有值”的直觉（非必需）。
             self.builder.emit(Opcode::LoadLocal(slot));
@@ -971,8 +1104,21 @@ impl<'p> Compiler<'p> {
         Ok(())
     }
 
-    /// 按名读取：局部槽 → upvalue → 全局/原生名。
+    /// 按名读取：`通过 模块` 覆盖 → 局部槽 → upvalue → 全局/原生名。
     fn emit_load_name(&mut self, name: &str) -> CompileResult<()> {
+        // 通过表达式内部：裸标识符优先解析为模块导出成员。
+        if let Some(module_name) = self.through_modules.last().cloned() {
+            // 模块别名自身是当前作用域可见的局部（import 绑定），先取出模块对象。
+            self.emit_load_name_unscoped(&module_name)?;
+            let name_idx = self.add_string_const(name);
+            self.builder.emit(Opcode::GetMember(name_idx));
+            return Ok(());
+        }
+        self.emit_load_name_unscoped(name)
+    }
+
+    /// 不经过 `通过` 模块覆盖的按名读取：局部槽 → upvalue → 全局/原生名。
+    fn emit_load_name_unscoped(&mut self, name: &str) -> CompileResult<()> {
         if let Some(slot) = self.scope.resolve(name) {
             self.builder.emit(Opcode::LoadLocal(slot));
         } else if let Some(up) = self.resolve_upvalue(name)? {
