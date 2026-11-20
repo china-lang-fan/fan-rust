@@ -956,4 +956,149 @@ mod tests {
         assert!(run(args(&["检查", &dir.to_string_lossy()])).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// 单文件双引擎执行结果分类。
+    #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+    enum SdkOutcome {
+        /// 两引擎都成功且捕获输出逐字节一致。
+        Agree,
+        /// VM 编译/运行不支持当前语法（含模块加载链上的不支持），按跳过处理。
+        VmUnsupported,
+        /// 两引擎都成功但输出不一致（真实语义差异，需排查）。
+        Diverge,
+        /// tree 成功但 VM 返回错误且非“不支持”类（运行期缺陷）。
+        VmError,
+        /// tree 自身失败（环境/基线问题），不计入 VM 覆盖率。
+        TreeError,
+    }
+
+    /// 用内存 sink 以指定引擎执行单个源文件，返回 (是否成功, 输出或错误消息)。
+    fn run_sdk_file(path: &str, engine: Engine) -> (bool, String) {
+        let source = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => return (false, format!("读取失败：{e}")),
+        };
+        let (program, errors) = parse_program(&source);
+        if !errors.is_empty() {
+            return (false, format!("解析失败：{}", errors.0.first().unwrap()));
+        }
+        let sink: Rc<RefCell<std::io::Cursor<Vec<u8>>>> =
+            Rc::new(RefCell::new(std::io::Cursor::new(Vec::new())));
+        let rt = Rc::new(RefCell::new(Runtime::with_output(sink.clone())));
+        let abs = abs_path(path);
+        let dir = Path::new(&abs)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let run_result: Result<(), String> = match engine {
+            Engine::Tree => {
+                let mut interp =
+                    Interpreter::for_script(rt, default_modules_dirs(&dir), &dir, &abs);
+                interp.run(&program).map(|_| ()).map_err(|e| e.display())
+            }
+            Engine::Vm => run_vm(&program, rt, &dir),
+        };
+        match run_result {
+            Ok(()) => (
+                true,
+                String::from_utf8(sink.borrow().get_ref().clone()).unwrap(),
+            ),
+            Err(e) => (false, e),
+        }
+    }
+
+    /// 判断 VM 错误是否属于“语法/能力暂不支持”类（区别于真实运行期缺陷）。
+    fn is_unsupported(msg: &str) -> bool {
+        const MARKERS: [&str; 7] = [
+            "暂不支持",
+            "不支持的语句",
+            "不支持的表达式",
+            "本地原生绑定",
+            "尚未在 VM 中实现",
+            "VM 暂不支持",
+            "未注入模块加载器",
+        ];
+        MARKERS.iter().any(|m| msg.contains(m))
+    }
+
+    fn classify_sdk_file(path: &str) -> SdkOutcome {
+        let (tree_ok, tree_out) = run_sdk_file(path, Engine::Tree);
+        if !tree_ok {
+            return SdkOutcome::TreeError;
+        }
+        let (vm_ok, vm_out) = run_sdk_file(path, Engine::Vm);
+        match vm_ok {
+            true if vm_out == tree_out => SdkOutcome::Agree,
+            true => SdkOutcome::Diverge,
+            false if is_unsupported(&vm_out) => SdkOutcome::VmUnsupported,
+            false => SdkOutcome::VmError,
+        }
+    }
+
+    /// 定位 SDK 测试目录：优先 FAN_SDK，否则跳过（返回 None）。
+    fn sdk_test_dir() -> Option<std::path::PathBuf> {
+        let root = std::env::var("FAN_SDK").ok()?;
+        let dir = std::path::PathBuf::from(root).join("测试");
+        dir.is_dir().then_some(dir)
+    }
+
+    #[test]
+    fn sdk双引擎对拍并量化vm覆盖率() {
+        let Some(dir) = sdk_test_dir() else {
+            eprintln!("跳过 SDK 对拍：未设置 FAN_SDK 或目录不存在");
+            return;
+        };
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                let n = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                n.ends_with("_测试.凡") || n.ends_with("_test.凡")
+            })
+            .collect();
+        files.sort();
+        assert!(!files.is_empty(), "SDK 测试目录应至少含一个测试文件");
+
+        let mut counts = std::collections::HashMap::new();
+        let mut details: Vec<(String, SdkOutcome, String)> = Vec::new();
+        let mut agreed_files: Vec<String> = Vec::new();
+        for path in &files {
+            let p = path.to_string_lossy().to_string();
+            let outcome = classify_sdk_file(&p);
+            if matches!(outcome, SdkOutcome::Agree) {
+                agreed_files.push(
+                    path.file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| p.clone()),
+                );
+            }
+            if !matches!(outcome, SdkOutcome::Agree | SdkOutcome::VmUnsupported) {
+                let (_, msg) = run_sdk_file(&p, Engine::Vm);
+                details.push((p.clone(), SdkOutcome::VmError, msg));
+            }
+            *counts.entry(outcome).or_insert(0u32) += 1;
+        }
+
+        let total = files.len() as u32;
+        let agree = counts.get(&SdkOutcome::Agree).copied().unwrap_or(0);
+        let unsupported = counts.get(&SdkOutcome::VmUnsupported).copied().unwrap_or(0);
+        let diverge = counts.get(&SdkOutcome::Diverge).copied().unwrap_or(0);
+        let vm_error = counts.get(&SdkOutcome::VmError).copied().unwrap_or(0);
+        let tree_error = counts.get(&SdkOutcome::TreeError).copied().unwrap_or(0);
+        eprintln!(
+            "SDK 双引擎对拍（共 {total} 文件）：一致 {agree}，VM暂不支持 {unsupported}，\
+             输出分歧 {diverge}，VM运行错误 {vm_error}，tree基线错误 {tree_error}"
+        );
+        for (p, _, msg) in &details {
+            eprintln!("  [VM错误] {p}：{msg}");
+        }
+        for name in &agreed_files {
+            eprintln!("  [一致] {name}");
+        }
+        // 硬断言：不允许输出分歧或 VM 运行期错误（暂不支持属预期，不计失败）。
+        assert_eq!(diverge, 0, "存在双引擎输出分歧，见上方明细");
+        assert_eq!(vm_error, 0, "存在 VM 运行期错误，见上方明细");
+        assert_eq!(tree_error, 0, "tree 基线自身失败，检查 FAN_SDK 环境");
+    }
 }

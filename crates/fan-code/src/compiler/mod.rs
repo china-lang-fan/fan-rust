@@ -7,6 +7,7 @@
 mod scope;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use fan_ast::expr::Expr;
@@ -27,7 +28,8 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
     let functions = Rc::new(RefCell::new(Vec::new()));
     let exports = Rc::new(RefCell::new(Vec::new()));
     let imports = Rc::new(RefCell::new(Vec::new()));
-    let mut compiler = Compiler::new(functions, exports, imports);
+    let native_aliases = Rc::new(RefCell::new(HashMap::new()));
+    let mut compiler = Compiler::new(functions, exports, imports, native_aliases);
     compiler.compile_statements(&program.statements)?;
     // 入口块以 Halt 收尾，停机时值栈顶即顶层最后一个表达式结果（若有）。
     compiler.builder.emit(Opcode::Halt);
@@ -58,6 +60,9 @@ struct Compiler<'p> {
     /// 模块导出/导入名，模块内所有函数编译器共享。
     exports: Rc<RefCell<Vec<String>>>,
     imports: Rc<RefCell<Vec<String>>>,
+    /// `定义 本地` 建立的「凡语函数名 → 原生 spec 名」别名，模块内共享。
+    /// 调用命中别名时发 CallNative 直接走 Runtime 原生表，不生成字节码函数体。
+    native_aliases: Rc<RefCell<HashMap<String, String>>>,
     scope: ScopeTracker,
     /// 当前函数登记的 upvalue 描述，顺序即运行期 upvalue 槽位顺序。
     upvalues: Vec<UpvalueDesc>,
@@ -85,12 +90,14 @@ impl<'p> Compiler<'p> {
         functions: Rc<RefCell<Vec<FunctionChunk>>>,
         exports: Rc<RefCell<Vec<String>>>,
         imports: Rc<RefCell<Vec<String>>>,
+        native_aliases: Rc<RefCell<HashMap<String, String>>>,
     ) -> Self {
         Compiler {
             builder: ChunkBuilder::new(),
             functions,
             exports,
             imports,
+            native_aliases,
             scope: ScopeTracker::new(),
             upvalues: Vec::new(),
             parent: None,
@@ -106,6 +113,7 @@ impl<'p> Compiler<'p> {
             Rc::clone(&self.functions),
             Rc::clone(&self.exports),
             Rc::clone(&self.imports),
+            Rc::clone(&self.native_aliases),
         );
         child.in_module = false;
         child.parent = Some(self as *const _ as *mut Compiler<'p>);
@@ -131,6 +139,27 @@ impl<'p> Compiler<'p> {
         match stmt {
             Stmt::VarDecl(d) => {
                 self.line(d.pos.line as u32);
+                // `定义 本地(..) 函数 名(..)`：原生别名在 compile_function_literal
+                // 内登记，此处只声明名字槽位，不压值也不 StoreLocal（栈上无函数值）。
+                let is_native = matches!(
+                    d.value.as_ref(),
+                    Some(Expr::Function(f)) if f.native.is_some()
+                );
+                if is_native {
+                    if let Some(Expr::Function(f)) = &d.value {
+                        self.compile_expr(&Expr::Function(f.clone()))?;
+                    }
+                    if self.scope.resolve(&d.name).is_none() {
+                        self.scope.declare(&d.name);
+                    }
+                    if matches!(d.visibility, fan_ast::stmt::Visibility::Public) {
+                        let mut exports = self.exports.borrow_mut();
+                        if !exports.contains(&d.name) {
+                            exports.push(d.name.clone());
+                        }
+                    }
+                    return Ok(());
+                }
                 if let Some(value) = &d.value {
                     self.compile_expr(value)?;
                 } else {
@@ -167,6 +196,18 @@ impl<'p> Compiler<'p> {
             }
             Stmt::MultiDecl(d) => {
                 self.line(d.pos.line as u32);
+                // 无初值多变量声明（`变量 甲、乙`）解析为空元组：为每个名字压入空值，
+                // 不走 UnpackTuple（没有可解构的元素）。
+                let is_empty_tuple = matches!(&d.value, Expr::Tuple(t) if t.elements.is_empty());
+                if is_empty_tuple {
+                    let nil = self.builder.add_constant(ConstValue::Nil);
+                    for name in d.names.iter().rev() {
+                        let slot = self.scope.declare(name);
+                        self.builder.emit(Opcode::Const(nil));
+                        self.builder.emit(Opcode::StoreLocal(slot));
+                    }
+                    return Ok(());
+                }
                 self.compile_expr(&d.value)?;
                 self.builder.emit(Opcode::UnpackTuple(d.names.len() as u16));
                 // 栈上现为按序的 n 个值，逆序弹出写入各名字槽位。
@@ -650,6 +691,26 @@ impl<'p> Compiler<'p> {
 
     fn compile_call(&mut self, call: &fan_ast::expr::CallExpr) -> CompileResult<()> {
         self.line(call.pos.line as u32);
+        // 原生别名：`定义 本地` 声明的凡语函数名直接映射到 Runtime 原生 spec。
+        let native_spec = if let fan_ast::expr::Expr::Ident(id) = &*call.callee {
+            self.native_aliases.borrow().get(&id.name).cloned()
+        } else {
+            None
+        };
+        if let Some(spec) = native_spec {
+            for arg in &call.args {
+                match arg {
+                    fan_ast::expr::Expr::Spread(_) => {
+                        return Err("字节码编译器暂不支持原生调用实参展开（...）".to_string());
+                    }
+                    other => self.compile_expr(other)?,
+                }
+            }
+            let spec_idx = self.add_string_const(&spec);
+            self.builder
+                .emit(Opcode::CallNative(spec_idx, call.args.len() as u8));
+            return Ok(());
+        }
         for arg in &call.args {
             match arg {
                 fan_ast::expr::Expr::Spread(s) => {
@@ -668,8 +729,16 @@ impl<'p> Compiler<'p> {
 
     fn compile_function_literal(&mut self, f: &fan_ast::expr::FunctionLit) -> CompileResult<()> {
         self.line(f.pos.line as u32);
-        if f.native.is_some() {
-            return Err("本地原生绑定（定义 本地）由装配层处理，不进字节码函数表".to_string());
+        // `定义 本地("spec") 函数 名(...)`：不生成字节码函数体，把凡语函数名登记为
+        // Runtime 原生 spec 的别名；调用该名时改发 CallNative。与树遍历求值器的
+        // bind_native 对齐：带模块前缀优先按完整 spec，否则按点号后的短名。
+        if let Some(decl) = &f.native {
+            if !f.name.is_empty() {
+                self.native_aliases
+                    .borrow_mut()
+                    .insert(f.name.clone(), decl.spec.clone());
+            }
+            return Ok(());
         }
         let name = if f.name_segments.is_empty() {
             if f.name.is_empty() {

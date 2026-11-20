@@ -185,6 +185,15 @@ mod tests {
     }
 
     #[test]
+    fn 定义本地别名映射到原生调用() {
+        // `定义 本地` 不生成字节码函数体，凡语名经别名表直接转 CallNative。
+        let src = "定义 本地(\"len\") 函数 长度(任意 值)\n 返回 空\n结束\n长度(\"abcd\")";
+        assert_eq!(run_with_natives(src).unwrap(), Object::Int(4));
+        let src2 = "定义 本地(\"type\") 函数 类型名(任意 值) -> 字符串\n 返回 空\n结束\n类型名(7)";
+        assert_eq!(run_with_natives(src2).unwrap(), Object::string("integer"));
+    }
+
+    #[test]
     fn 原生type返回运行时类型名() {
         assert_eq!(
             run_with_natives("type(42)").unwrap(),
