@@ -614,9 +614,44 @@ mod tests {
     }
 
     #[test]
+    fn 双引擎对拍数组下标与切片() {
+        let src = "变量 组 = [10, 20, 30, 40]\n\
+                   打印行(组[2])\n组[1] = 99\n打印行(组[1])\n\
+                   打印行(组[0:2])\n打印行(\"凡语言编程\"[1:3])\n";
+        assert_engines_agree(src);
+    }
+
+    #[test]
+    fn 双引擎对拍字典读写() {
+        let src = "变量 表 = {\"甲\": 1, \"乙\": 2}\n\
+                   打印行(表[\"甲\"])\n表[\"丙\"] = 3\n打印行(表[\"丙\"])\n打印行(表[\"无\"])\n";
+        assert_engines_agree(src);
+    }
+
+    #[test]
+    fn 双引擎对拍遍历数组与字符串() {
+        let src = "变量 和 = 0\n遍历 [1, 2, 3, 4] 中的 元素 序号\n  和 = 和 加 元素\n结束\n打印行(和)\n\
+                   变量 拼接 = \"\"\n遍历 \"凡语\" 中的 字\n  拼接 = 拼接 加 字\n结束\n打印行(拼接)\n";
+        assert_engines_agree(src);
+    }
+
+    #[test]
+    fn 双引擎对拍遍历字典() {
+        let src = "变量 总和 = 0\n遍历 {\"甲\": 1, \"乙\": 2, \"丙\": 3} 中的 键 值\n  总和 = 总和 加 值\n结束\n打印行(总和)\n";
+        assert_engines_agree(src);
+    }
+
+    #[test]
+    fn 双引擎对拍跳出与继续() {
+        let src = "变量 和 = 0\n遍历 [1, 2, 3, 4] 中的 元素\n  如果 元素 等于 2 那么\n    继续\n  结束\n  如果 元素 大于 3 那么\n    跳出\n  结束\n  和 = 和 加 元素\n结束\n打印行(和)\n";
+        assert_engines_agree(src);
+    }
+
+    #[test]
     fn vm遇到不支持的语法返回明确错误() {
-        // 下标属 M2，VM 编译器应给出可识别的“暂不支持”错误而非 panic。
-        let err = run_engine_captured("变量 组 = 空\n打印行(组[0])\n", Engine::Vm).unwrap_err();
+        // 数组字面量展开（...）尚未在字节码编译器支持，应给“暂不支持”错误而非 panic。
+        let err = run_engine_captured("变量 甲 = [1]\n变量 乙 = [...甲]\n打印行(乙)\n", Engine::Vm)
+            .unwrap_err();
         assert!(err.contains("暂不支持"), "实际：{err}");
     }
 

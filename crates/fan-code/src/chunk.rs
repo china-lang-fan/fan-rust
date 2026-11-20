@@ -148,7 +148,15 @@ impl ChunkBuilder {
             | Opcode::Throw
             | Opcode::Recover
             | Opcode::CallIfFunc
-            | Opcode::ArgCount => {}
+            | Opcode::ArgCount
+            | Opcode::GetSlice => {}
+            Opcode::ForStep(tag, iterable, counter, elem, index_slot) => {
+                self.chunk.code.push(*tag);
+                self.chunk.code.extend_from_slice(&iterable.to_le_bytes());
+                self.chunk.code.extend_from_slice(&counter.to_le_bytes());
+                self.chunk.code.extend_from_slice(&elem.to_le_bytes());
+                self.chunk.code.extend_from_slice(&index_slot.to_le_bytes());
+            }
         }
         offset
     }
@@ -167,6 +175,11 @@ impl ChunkBuilder {
     /// 把跳转指令在 `offset` 处的操作数回填为当前代码长度。
     pub fn patch_jump(&mut self, offset: usize) {
         let target = self.chunk.code.len() as u32;
+        self.patch_jump_to(offset, target as usize);
+    }
+
+    /// 把跳转指令在 `offset` 处的操作数回填为指定目标偏移。
+    pub fn patch_jump_to(&mut self, offset: usize, target: usize) {
         let op = self.chunk.code[offset];
         debug_assert!(
             matches!(
@@ -175,7 +188,7 @@ impl ChunkBuilder {
             ),
             "回填目标必须是跳转指令"
         );
-        let bytes = target.to_le_bytes();
+        let bytes = (target as u32).to_le_bytes();
         self.chunk.code[offset + 1..offset + 5].copy_from_slice(&bytes);
     }
 

@@ -94,7 +94,20 @@ pub enum Opcode {
     UnpackTuple(u16) = 32,
     /// 把当前函数帧实际收到的实参个数压栈（用于默认参数的缺省判定）。
     ArgCount = 33,
+    /// 遍历循环步进：操作数依次为类型标签、可迭代对象槽、计数器槽、
+    /// 元素槽、序号槽。由槽内计数器推进并把下一轮元素/序号绑定到指定槽位，
+    /// 栈顶压入“是否还有下一轮”的布尔值。
+    ForStep(u8, u16, u16, u16, u16) = 36,
+    /// 切片：依次弹出 high、low（任一侧为空值表示省略）、target，压入切片结果。
+    GetSlice = 37,
 }
+
+/// [`Opcode::ForStep`] 的可迭代对象类型标签。
+pub const FOR_TAG_ARRAY: u8 = 0;
+pub const FOR_TAG_STRING: u8 = 1;
+pub const FOR_TAG_DICT: u8 = 2;
+/// [`Opcode::ForStep`] 序号/键槽的哨兵：表示该遍历没有第二个迭代变量。
+pub const FOR_NO_INDEX_SLOT: u16 = u16::MAX;
 
 impl Opcode {
     /// 该指令（不含操作码本身）的操作数字节数。
@@ -109,7 +122,8 @@ impl Opcode {
             | Opcode::Throw
             | Opcode::Recover
             | Opcode::CallIfFunc
-            | Opcode::ArgCount => 0,
+            | Opcode::ArgCount
+            | Opcode::GetSlice => 0,
 
             Opcode::Const(_)
             | Opcode::LoadLocal(_)
@@ -132,6 +146,7 @@ impl Opcode {
             Opcode::Jump(_) | Opcode::JumpIfFalse(_) | Opcode::JumpIfTrue(_) => 4,
 
             Opcode::Call(_) => 1,
+            Opcode::ForStep(..) => 9,
             Opcode::CallNative(_, argc)
             | Opcode::MixfixCall(_, argc)
             | Opcode::InvokeMethod(_, argc) => {
@@ -184,6 +199,8 @@ impl Opcode {
             31 => Some(Opcode::CallIfFunc),
             32 => Some(Opcode::UnpackTuple(0)),
             33 => Some(Opcode::ArgCount),
+            36 => Some(Opcode::ForStep(0, 0, 0, 0, 0)),
+            37 => Some(Opcode::GetSlice),
             _ => None,
         }
     }

@@ -62,6 +62,10 @@ fn decode_instruction(code: &[u8], start: usize) -> Result<(Opcode, usize), Stri
         Opcode::CallIfFunc => Opcode::CallIfFunc,
         Opcode::UnpackTuple(_) => Opcode::UnpackTuple(u16_at(0)),
         Opcode::ArgCount => Opcode::ArgCount,
+        Opcode::ForStep(..) => {
+            Opcode::ForStep(operand[0], u16_at(1), u16_at(3), u16_at(5), u16_at(7))
+        }
+        Opcode::GetSlice => Opcode::GetSlice,
     };
     Ok((op, 1 + operand_size))
 }
@@ -118,6 +122,10 @@ fn render(op: &Opcode, chunk: &Chunk) -> String {
         Opcode::CallIfFunc => "CALL_IF_FUNC".to_string(),
         Opcode::UnpackTuple(n) => format!("UNPACK_TUPLE {n}"),
         Opcode::ArgCount => "ARG_COUNT".to_string(),
+        Opcode::ForStep(tag, iterable, counter, elem, index_slot) => format!(
+            "FOR_STEP tag={tag} iter_slot={iterable} counter_slot={counter} elem_slot={elem} idx_slot={index_slot}"
+        ),
+        Opcode::GetSlice => "GET_SLICE".to_string(),
         other => format!("{other:?}"),
     }
 }

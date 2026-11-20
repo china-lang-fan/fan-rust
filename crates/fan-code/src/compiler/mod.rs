@@ -45,6 +45,16 @@ struct Compiler {
     params: Vec<String>,
     /// 是否正在编译模块入口（决定顶层表达式语句是否保留值）。
     in_module: bool,
+    /// 嵌套循环的跳转信息栈：`(break 目标待回填偏移, continue 目标待回填偏移)`。
+    loops: Vec<LoopCtx>,
+}
+
+/// 一个循环的控制流回填点。
+struct LoopCtx {
+    /// 循环内 `跳出` 的跳转指令偏移列表，循环结束时统一回填到出口。
+    breaks: Vec<usize>,
+    /// `继续` 的跳转指令偏移列表，回填到循环的条件/步进起点。
+    continues: Vec<usize>,
 }
 
 impl Compiler {
@@ -57,6 +67,7 @@ impl Compiler {
             scope: ScopeTracker::new(),
             params: Vec::new(),
             in_module: true,
+            loops: Vec::new(),
         }
     }
 
@@ -141,6 +152,7 @@ impl Compiler {
             Stmt::While(w) => self.compile_while(w),
             Stmt::Repeat(r) => self.compile_repeat(r),
             Stmt::Times(t) => self.compile_times(t),
+            Stmt::ForEach(f) => self.compile_foreach(f),
             Stmt::Return(r) => {
                 self.line(r.pos.line as u32);
                 match r.values.as_slice() {
@@ -159,8 +171,30 @@ impl Compiler {
                 self.builder.emit(Opcode::Return);
                 Ok(())
             }
-            Stmt::Break(_) | Stmt::Continue(_) => {
-                Err("跳出/继续 将在循环里程碑接入字节码".to_string())
+            Stmt::Break(_) => {
+                let ctx = self
+                    .loops
+                    .last_mut()
+                    .ok_or_else(|| "跳出 只能出现在循环内".to_string())?;
+                ctx.breaks.push(self.builder.emit(Opcode::Jump(0)));
+                Ok(())
+            }
+            Stmt::Continue(_) => {
+                let ctx = self
+                    .loops
+                    .last_mut()
+                    .ok_or_else(|| "继续 只能出现在循环内".to_string())?;
+                ctx.continues.push(self.builder.emit(Opcode::Jump(0)));
+                Ok(())
+            }
+            Stmt::IndexAssign(a) => {
+                self.line(a.pos.line as u32);
+                // 栈布局：容器、下标、值依次压栈，SetIndex 无操作数依次弹出。
+                self.compile_expr(&a.target)?;
+                self.compile_expr(&a.index)?;
+                self.compile_expr(&a.value)?;
+                self.builder.emit(Opcode::SetIndex);
+                Ok(())
             }
             other => Err(format!(
                 "字节码编译器暂不支持的语句：{}",
@@ -203,28 +237,54 @@ impl Compiler {
 
     fn compile_while(&mut self, w: &fan_ast::stmt::WhileStmt) -> CompileResult<()> {
         self.line(w.pos.line as u32);
-        let loop_start = self.builder.code_len() as u32;
+        let loop_start = self.builder.code_len();
+        self.loops.push(LoopCtx {
+            breaks: Vec::new(),
+            continues: Vec::new(),
+        });
         self.compile_expr(&w.condition)?;
         let exit = self.builder.emit(Opcode::JumpIfFalse(0));
         self.builder.emit(Opcode::Pop);
         self.compile_block(&w.body.statements)?;
-        self.builder.emit(Opcode::Jump(loop_start));
+        self.builder.emit(Opcode::Jump(loop_start as u32));
         self.builder.patch_jump(exit);
         self.builder.emit(Opcode::Pop); // 退出时弹出条件假值
+        let after_pop = self.builder.code_len();
+        let ctx = self.loops.pop().expect("循环上下文存在");
+        for jump in ctx.continues {
+            self.builder.patch_jump_to(jump, loop_start);
+        }
+        for jump in ctx.breaks {
+            self.builder.patch_jump_to(jump, after_pop);
+        }
         Ok(())
     }
 
     /// `重复 ... 直到 条件`：后判断循环，至少执行一次，条件为真时退出。
     fn compile_repeat(&mut self, r: &fan_ast::stmt::RepeatStmt) -> CompileResult<()> {
         self.line(r.pos.line as u32);
-        let loop_start = self.builder.code_len() as u32;
+        let loop_start = self.builder.code_len();
+        self.loops.push(LoopCtx {
+            breaks: Vec::new(),
+            continues: Vec::new(),
+            // 条件在循环体之后才求值，体执行（含 break）时栈上尚无布尔残留。
+        });
         self.compile_block(&r.body.statements)?;
+        let cond_start = self.builder.code_len();
         self.compile_expr(&r.until)?;
         let exit = self.builder.emit(Opcode::JumpIfTrue(0));
         self.builder.emit(Opcode::Pop);
-        self.builder.emit(Opcode::Jump(loop_start));
+        self.builder.emit(Opcode::Jump(loop_start as u32));
         self.builder.patch_jump(exit);
         self.builder.emit(Opcode::Pop);
+        let after_pop = self.builder.code_len();
+        let ctx = self.loops.pop().expect("循环上下文存在");
+        for jump in ctx.continues {
+            self.builder.patch_jump_to(jump, cond_start);
+        }
+        for jump in ctx.breaks {
+            self.builder.patch_jump_to(jump, after_pop);
+        }
         Ok(())
     }
 
@@ -235,7 +295,11 @@ impl Compiler {
         let counter = self.scope.declare("__times_counter__");
         self.builder.emit(Opcode::StoreLocal(counter));
 
-        let loop_start = self.builder.code_len() as u32;
+        let loop_start = self.builder.code_len();
+        self.loops.push(LoopCtx {
+            breaks: Vec::new(),
+            continues: Vec::new(),
+        });
         self.builder.emit(Opcode::LoadLocal(counter));
         let zero = self.builder.add_constant(ConstValue::Int(0));
         self.builder.emit(Opcode::Const(zero));
@@ -253,10 +317,92 @@ impl Compiler {
         let sub = self.add_string_const("减");
         self.builder.emit(Opcode::BinOp(sub));
         self.builder.emit(Opcode::StoreLocal(counter));
-        self.builder.emit(Opcode::Jump(loop_start));
+        self.builder.emit(Opcode::Jump(loop_start as u32));
 
         self.builder.patch_jump(exit);
         self.builder.emit(Opcode::Pop);
+        let after_pop = self.builder.code_len();
+        let ctx = self.loops.pop().expect("循环上下文存在");
+        for jump in ctx.continues {
+            self.builder.patch_jump_to(jump, loop_start);
+        }
+        for jump in ctx.breaks {
+            self.builder.patch_jump_to(jump, after_pop);
+        }
+        Ok(())
+    }
+
+    /// `遍历 可迭代 中的 元素[, 序号]`：把可迭代对象与计数器存隐藏槽位，
+    /// 用 `ForStep` 在运行期按类型推进并绑定迭代变量，条件为假时退出。
+    fn compile_foreach(&mut self, f: &fan_ast::stmt::ForEachStmt) -> CompileResult<()> {
+        self.line(f.pos.line as u32);
+        use fan_ast::expr::Expr as E;
+        // 仅支持数组、字符串、字典三类可迭代字面表达式；复杂表达式先求值入槽。
+        let tag = match &f.iterable {
+            E::Array(_) => crate::opcode::FOR_TAG_ARRAY,
+            E::Str(_) | E::Char(_) => crate::opcode::FOR_TAG_STRING,
+            E::Dict(_) => crate::opcode::FOR_TAG_DICT,
+            _ => {
+                return Err(
+                    "字节码编译器暂不支持对复杂表达式直接遍历（请先存入变量再遍历）".to_string(),
+                )
+            }
+        };
+
+        // 求值可迭代对象并保存到隐藏槽。
+        self.compile_expr(&f.iterable)?;
+        let iter_slot = self.scope.declare("__foreach_iter__");
+        self.builder.emit(Opcode::StoreLocal(iter_slot));
+        let counter_slot = self.scope.declare("__foreach_counter__");
+        let zero = self.builder.add_constant(ConstValue::Int(0));
+        self.builder.emit(Opcode::Const(zero));
+        self.builder.emit(Opcode::StoreLocal(counter_slot));
+
+        // 先在当前作用域分配迭代变量槽位，再推进循环体作用域让名字在体内可见，
+        // 退出循环后这些名字不可见（与树遍历求值器的作用域一致）。
+        let elem_slot = self.scope.declare(&f.first_name);
+        let index_slot = match &f.second_name {
+            Some(name) => self.scope.declare(name),
+            None => crate::opcode::FOR_NO_INDEX_SLOT,
+        };
+        self.scope.push();
+        self.scope.declare_at(&f.first_name, elem_slot);
+        if let Some(name) = &f.second_name {
+            self.scope.declare_at(name, index_slot);
+        }
+
+        let loop_start = self.builder.code_len();
+        self.loops.push(LoopCtx {
+            breaks: Vec::new(),
+            continues: Vec::new(),
+            // ForStep 布尔在进入循环体前已由 JumpIfFalse 后的 Pop 消费，
+            // 故 break 时值栈无残留布尔，跳到出口 Pop 之后即可。
+        });
+        self.builder.emit(Opcode::ForStep(
+            tag,
+            iter_slot,
+            counter_slot,
+            elem_slot,
+            index_slot,
+        ));
+        let exit = self.builder.emit(Opcode::JumpIfFalse(0));
+        self.builder.emit(Opcode::Pop); // 弹出“还有下一轮”的真值
+        for stmt in &f.body.statements {
+            self.compile_stmt(stmt)?;
+        }
+        self.scope.pop();
+        self.builder.emit(Opcode::Jump(loop_start as u32));
+
+        self.builder.patch_jump(exit);
+        self.builder.emit(Opcode::Pop); // 退出时弹出假值
+        let after_pop = self.builder.code_len();
+        let ctx = self.loops.pop().expect("循环上下文存在");
+        for jump in ctx.continues {
+            self.builder.patch_jump_to(jump, loop_start);
+        }
+        for jump in ctx.breaks {
+            self.builder.patch_jump_to(jump, after_pop);
+        }
         Ok(())
     }
 
@@ -352,6 +498,59 @@ impl Compiler {
                 }
                 self.builder
                     .emit(Opcode::BuildTuple(t.elements.len() as u16));
+                Ok(())
+            }
+            Expr::Array(a) => {
+                self.line(a.pos.line as u32);
+                for element in &a.elements {
+                    if let fan_ast::expr::Expr::Spread(_) = element {
+                        return Err("字节码编译器暂不支持数组字面量展开（...）".to_string());
+                    }
+                    self.compile_expr(element)?;
+                }
+                self.builder
+                    .emit(Opcode::BuildArray(a.elements.len() as u16));
+                Ok(())
+            }
+            Expr::Dict(d) => {
+                self.line(d.pos.line as u32);
+                for pair in &d.pairs {
+                    if pair.spread {
+                        return Err("字节码编译器暂不支持字典字面量展开（...）".to_string());
+                    }
+                    let key = pair.key.as_ref().expect("非展开字典项必须有键表达式");
+                    self.compile_expr(key)?;
+                    self.compile_expr(&pair.value)?;
+                }
+                self.builder.emit(Opcode::BuildDict(d.pairs.len() as u16));
+                Ok(())
+            }
+            Expr::Index(idx) => {
+                self.line(idx.pos.line as u32);
+                self.compile_expr(&idx.target)?;
+                self.compile_expr(&idx.index)?;
+                self.builder.emit(Opcode::GetIndex);
+                Ok(())
+            }
+            Expr::Slice(s) => {
+                self.line(s.pos.line as u32);
+                // 栈布局：target、low、high；省略的边界压 Nil 哨兵。
+                self.compile_expr(&s.target)?;
+                match &s.low {
+                    Some(low) => self.compile_expr(low)?,
+                    None => {
+                        let nil = self.builder.add_constant(ConstValue::Nil);
+                        self.builder.emit(Opcode::Const(nil));
+                    }
+                }
+                match &s.high {
+                    Some(high) => self.compile_expr(high)?,
+                    None => {
+                        let nil = self.builder.add_constant(ConstValue::Nil);
+                        self.builder.emit(Opcode::Const(nil));
+                    }
+                }
+                self.builder.emit(Opcode::GetSlice);
                 Ok(())
             }
             other => Err(format!(

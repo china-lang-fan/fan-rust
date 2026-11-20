@@ -226,6 +226,58 @@ impl<'m> Vm<'m> {
                     let argc = self.frames.last().expect("帧存在").argc;
                     self.stack.push(Object::Int(argc as i64));
                 }
+                Opcode::BuildArray(_) => {
+                    let count = self.read_u16(&chunk)? as usize;
+                    let elements = self.pop_args(count)?;
+                    self.stack.push(Object::array(elements));
+                }
+                Opcode::BuildDict(_) => {
+                    let pairs = self.read_u16(&chunk)? as usize;
+                    // 栈上依次为 key0, value0, key1, value1 …，pop_args 保持顺序。
+                    let entries = self.pop_args(pairs * 2)?;
+                    let mut dict = fan_object::FanDict::new();
+                    let mut i = 0;
+                    while i < entries.len() {
+                        let key = entries[i].clone();
+                        let value = entries[i + 1].clone();
+                        if !key.is_dict_key() {
+                            return Err(VmError::new(format!(
+                                "不支持的字典键类型：{}",
+                                key.kind()
+                            )));
+                        }
+                        dict.set(key, value);
+                        i += 2;
+                    }
+                    self.stack.push(Object::Dict(dict));
+                }
+                Opcode::GetIndex => {
+                    let index = self.pop_operand()?;
+                    let target = self.pop_operand()?;
+                    let value = self.get_index(&target, &index)?;
+                    self.stack.push(value);
+                }
+                Opcode::SetIndex => {
+                    let value = self.pop_operand()?;
+                    let index = self.pop_operand()?;
+                    let target = self.pop_operand()?;
+                    self.set_index(&target, &index, value)?;
+                }
+                Opcode::GetSlice => {
+                    let high = self.pop_operand()?;
+                    let low = self.pop_operand()?;
+                    let target = self.pop_operand()?;
+                    let result = self.get_slice(&target, &low, &high)?;
+                    self.stack.push(result);
+                }
+                Opcode::ForStep(..) => {
+                    let tag = self.read_u8(&chunk)?;
+                    let iter_slot = self.read_u16(&chunk)? as usize;
+                    let counter_slot = self.read_u16(&chunk)? as usize;
+                    let elem_slot = self.read_u16(&chunk)? as usize;
+                    let index_slot = self.read_u16(&chunk)? as usize;
+                    self.for_step(tag, iter_slot, counter_slot, elem_slot, index_slot)?;
+                }
                 Opcode::CallNative(_, _) => {
                     let idx = self.read_u16(&chunk)? as usize;
                     let argc = self.read_u8(&chunk)? as usize;
@@ -341,6 +393,232 @@ impl<'m> Vm<'m> {
             1 => self.stack.push(values.into_iter().next().unwrap()),
             _ => self.stack.push(Object::tuple(values)),
         }
+    }
+
+    /// 读取当前帧槽位中的对象。
+    fn slot(&self, frame_base: usize, slot: usize) -> Object {
+        self.slots
+            .get(frame_base + slot)
+            .cloned()
+            .unwrap_or(Object::Nil)
+    }
+
+    /// 写入当前帧槽位，槽位不足时扩展。
+    fn set_slot(&mut self, frame_base: usize, slot: usize, value: Object) {
+        let target = frame_base + slot;
+        if target >= self.slots.len() {
+            self.slots.resize(target + 1, Object::Nil);
+        }
+        self.slots[target] = value;
+    }
+
+    /// 下标读取，语义对齐树遍历求值器：数组按整数下标、字符串产字符、
+    /// 字典按键查找（缺失返回空）。
+    fn get_index(&self, target: &Object, index: &Object) -> VmResult<Object> {
+        match target.unwrap_named() {
+            Object::Array(arr) => {
+                let Some(i) = index.as_int() else {
+                    return Err(VmError::new(format!(
+                        "数组下标必须是整数，实际是 {}",
+                        index.kind()
+                    )));
+                };
+                let len = arr.len() as i64;
+                if i < 0 || i >= len {
+                    return Err(VmError::new(format!(
+                        "数组下标越界：长度 {}，下标 {}",
+                        len, i
+                    )));
+                }
+                Ok(arr.get(i as usize).unwrap_or(Object::Nil))
+            }
+            Object::Str(text) => {
+                let Some(i) = index.as_int() else {
+                    return Err(VmError::new(format!(
+                        "字符串下标必须是整数，实际是 {}",
+                        index.kind()
+                    )));
+                };
+                let chars: Vec<char> = text.chars().collect();
+                if i < 0 || i as usize >= chars.len() {
+                    return Err(VmError::new(format!(
+                        "字符串下标越界：长度 {}，下标 {}",
+                        chars.len(),
+                        i
+                    )));
+                }
+                Ok(Object::Char(chars[i as usize]))
+            }
+            Object::Dict(dict) => {
+                if !index.is_dict_key() {
+                    return Err(VmError::new(format!(
+                        "不支持的字典键类型：{}",
+                        index.kind()
+                    )));
+                }
+                Ok(dict.get(index).unwrap_or(Object::Nil))
+            }
+            other => Err(VmError::new(format!("{} 不支持下标访问", other.kind()))),
+        }
+    }
+
+    /// 下标写入：数组就地替换、字典按键写入。
+    fn set_index(&self, target: &Object, index: &Object, value: Object) -> VmResult<()> {
+        match target.unwrap_named() {
+            Object::Array(arr) => {
+                let Some(i) = index.as_int() else {
+                    return Err(VmError::new(format!(
+                        "数组下标必须是整数，实际是 {}",
+                        index.kind()
+                    )));
+                };
+                let len = arr.len() as i64;
+                if i < 0 || i >= len {
+                    return Err(VmError::new(format!(
+                        "数组下标越界：长度 {}，下标 {}",
+                        len, i
+                    )));
+                }
+                arr.set(i as usize, value);
+                Ok(())
+            }
+            Object::Dict(mut dict) => {
+                if !index.is_dict_key() {
+                    return Err(VmError::new(format!(
+                        "不支持的字典键类型：{}",
+                        index.kind()
+                    )));
+                }
+                dict.set(index.clone(), value);
+                Ok(())
+            }
+            other => Err(VmError::new(format!("{} 不支持下标赋值", other.kind()))),
+        }
+    }
+
+    /// 切片：边界为 Nil 时取默认（下界 0、上界长度），并按树遍历语义 clamp。
+    fn get_slice(&self, target: &Object, low: &Object, high: &Object) -> VmResult<Object> {
+        let len = match target.unwrap_named() {
+            Object::Array(a) => a.len() as i64,
+            Object::Str(s) => s.chars().count() as i64,
+            other => return Err(VmError::new(format!("{} 不支持切片", other.kind()))),
+        };
+        let low = match low {
+            Object::Nil => 0,
+            v => v
+                .as_int()
+                .ok_or_else(|| VmError::new("切片下界必须是整数"))?,
+        };
+        let high = match high {
+            Object::Nil => len,
+            v => v
+                .as_int()
+                .ok_or_else(|| VmError::new("切片上界必须是整数"))?,
+        };
+        let low = low.clamp(0, len);
+        let high = high.clamp(low, len);
+        match target.unwrap_named() {
+            Object::Array(a) => {
+                let mut out = Vec::new();
+                for i in low..high {
+                    if let Some(v) = a.get(i as usize) {
+                        out.push(v);
+                    }
+                }
+                Ok(Object::array(out))
+            }
+            Object::Str(s) => {
+                let out: String = s
+                    .chars()
+                    .skip(low as usize)
+                    .take((high - low) as usize)
+                    .collect();
+                Ok(Object::string(out))
+            }
+            _ => unreachable!("切片目标已在前面校验"),
+        }
+    }
+
+    /// 遍历循环步进：按类型标签推进计数器，把下一轮元素/序号绑定到槽位，
+    /// 并在栈顶压入“是否还有下一轮”的布尔值。
+    fn for_step(
+        &mut self,
+        tag: u8,
+        iter_slot: usize,
+        counter_slot: usize,
+        elem_slot: usize,
+        index_slot: usize,
+    ) -> VmResult<()> {
+        let base = self.frames.last().expect("帧存在").slot_base;
+        let iterable = self.slot(base, iter_slot);
+        let counter = self.slot(base, counter_slot).as_int().unwrap_or(0);
+        let has_more = match tag {
+            fan_code::opcode::FOR_TAG_ARRAY => {
+                let Object::Array(arr) = iterable else {
+                    return Err(VmError::new(format!(
+                        "遍历目标应为数组，实际是 {}",
+                        iterable.kind()
+                    )));
+                };
+                let has_more = (counter as usize) < arr.len();
+                if has_more {
+                    let idx = counter as usize;
+                    self.set_slot(base, elem_slot, arr.get(idx).unwrap_or(Object::Nil));
+                    if (index_slot as u16) != fan_code::opcode::FOR_NO_INDEX_SLOT {
+                        self.set_slot(base, index_slot, Object::Int(counter));
+                    }
+                    self.set_slot(base, counter_slot, Object::Int(counter + 1));
+                }
+                has_more
+            }
+            fan_code::opcode::FOR_TAG_STRING => {
+                let Object::Str(text) = iterable else {
+                    return Err(VmError::new(format!(
+                        "遍历目标应为字符串，实际是 {}",
+                        iterable.kind()
+                    )));
+                };
+                let chars: Vec<String> = text.chars().map(|c| c.to_string()).collect();
+                let has_more = (counter as usize) < chars.len();
+                if has_more {
+                    let idx = counter as usize;
+                    self.set_slot(base, elem_slot, Object::string(chars[idx].clone()));
+                    if (index_slot as u16) != fan_code::opcode::FOR_NO_INDEX_SLOT {
+                        self.set_slot(base, index_slot, Object::Int(counter));
+                    }
+                    self.set_slot(base, counter_slot, Object::Int(counter + 1));
+                }
+                has_more
+            }
+            fan_code::opcode::FOR_TAG_DICT => {
+                let Object::Dict(dict) = iterable else {
+                    return Err(VmError::new(format!(
+                        "遍历目标应为字典，实际是 {}",
+                        iterable.kind()
+                    )));
+                };
+                let keys = dict.keys();
+                let has_more = (counter as usize) < keys.len();
+                if has_more {
+                    let idx = counter as usize;
+                    let key = keys[idx].clone();
+                    let value = dict.get(&key).unwrap_or(Object::Nil);
+                    // 双变量时首槽绑定键、次槽绑定值；单变量（序号槽为哨兵）
+                    // 仅元素槽绑定值。
+                    if (index_slot as u16) == fan_code::opcode::FOR_NO_INDEX_SLOT {
+                        self.set_slot(base, elem_slot, value);
+                    } else {
+                        self.set_slot(base, elem_slot, key);
+                        self.set_slot(base, index_slot, value);
+                    }
+                    self.set_slot(base, counter_slot, Object::Int(counter + 1));
+                }
+                has_more
+            }
+            other => return Err(VmError::new(format!("未知遍历类型标签：{other}"))),
+        };
+        self.stack.push(Object::Bool(has_more));
+        Ok(())
     }
 
     fn pop_args(&mut self, argc: usize) -> VmResult<Vec<Object>> {

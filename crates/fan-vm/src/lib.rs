@@ -196,4 +196,114 @@ mod tests {
         let src = "函数 双倍长度(任意 文本)\n  返回 len(文本) 乘 2\n结束\n双倍长度(\"abcd\")";
         assert_eq!(run_with_natives(src).unwrap(), Object::Int(8));
     }
+
+    #[test]
+    fn 数组字面量与下标读取() {
+        let src = "变量 组 = [10, 20, 30]\n组[1]";
+        assert_eq!(run_source(src).unwrap(), Object::Int(20));
+    }
+
+    #[test]
+    fn 数组下标赋值就地修改() {
+        let src = "变量 组 = [1, 2, 3]\n组[1] = 99\n组[1]";
+        assert_eq!(run_source(src).unwrap(), Object::Int(99));
+    }
+
+    #[test]
+    fn 数组越界读取报错() {
+        assert!(run_source("变量 组 = [1]\n组[5]").is_err());
+    }
+
+    #[test]
+    fn 数组与字符串切片() {
+        let src = "变量 组 = [1, 2, 3, 4]\n组[1:3]";
+        match run_source(src).unwrap() {
+            Object::Array(a) => assert_eq!(*a.0.borrow(), vec![Object::Int(2), Object::Int(3)]),
+            other => panic!("应为数组，实际 {other:?}"),
+        }
+        assert_eq!(
+            run_source("\"凡语言编程\"[1:3]").unwrap(),
+            Object::string("语言")
+        );
+        // 省略边界。
+        let src2 = "变量 组 = [1, 2, 3]\n组[:2]";
+        assert!(matches!(run_source(src2).unwrap(), Object::Array(_)));
+    }
+
+    #[test]
+    fn 字符串下标产出字符() {
+        assert_eq!(run_source("\"凡语言\"[1]").unwrap(), Object::Char('语'));
+    }
+
+    #[test]
+    fn 字典字面量与按键读取() {
+        let src = "变量 表 = {\"甲\": 1, \"乙\": 2}\n表[\"乙\"]";
+        assert_eq!(run_source(src).unwrap(), Object::Int(2));
+    }
+
+    #[test]
+    fn 字典按键写入与缺失键返回空() {
+        let src = "变量 表 = {\"甲\": 1}\n表[\"乙\"] = 2\n表[\"乙\"]";
+        assert_eq!(run_source(src).unwrap(), Object::Int(2));
+        assert_eq!(
+            run_source("变量 表 = {\"甲\": 1}\n表[\"无\"]").unwrap(),
+            Object::Nil
+        );
+    }
+
+    #[test]
+    fn 遍历数组带序号() {
+        let src = "变量 和 = 0\n遍历 [1, 2, 3, 4] 中的 元素 序号\n  和 = 和 加 元素\n结束\n和";
+        assert_eq!(run_source(src).unwrap(), Object::Int(10));
+    }
+
+    #[test]
+    fn 遍历数组单变量() {
+        let src = "变量 和 = 0\n遍历 [1, 2, 3] 中的 元素\n  和 = 和 加 元素\n结束\n和";
+        assert_eq!(run_source(src).unwrap(), Object::Int(6));
+    }
+
+    #[test]
+    fn 遍历字符串产出单字符字符串() {
+        let src = "变量 拼接 = \"\"\n遍历 \"凡语\" 中的 字\n  拼接 = 拼接 加 字\n结束\n拼接";
+        assert_eq!(run_source(src).unwrap(), Object::string("凡语"));
+    }
+
+    #[test]
+    fn 遍历字典键值() {
+        let src = "变量 总和 = 0\n遍历 {\"甲\": 1, \"乙\": 2} 中的 键 值\n  总和 = 总和 加 值\n结束\n总和";
+        assert_eq!(run_source(src).unwrap(), Object::Int(3));
+    }
+
+    #[test]
+    fn 跳出提前结束遍历() {
+        let src = "变量 和 = 0\n遍历 [1, 2, 3, 4] 中的 元素\n  如果 元素 大于 2 那么\n    跳出\n  结束\n  和 = 和 加 元素\n结束\n和";
+        assert_eq!(run_source(src).unwrap(), Object::Int(3));
+    }
+
+    #[test]
+    fn 继续跳过本轮() {
+        let src = "变量 和 = 0\n遍历 [1, 2, 3, 4] 中的 元素\n  如果 元素 等于 2 那么\n    继续\n  结束\n  和 = 和 加 元素\n结束\n和";
+        assert_eq!(run_source(src).unwrap(), Object::Int(8));
+    }
+
+    #[test]
+    fn while循环内跳出与继续() {
+        let src = "变量 和 = 0\n变量 序号 = 0\n当 序号 小于 10 循环\n  序号 = 序号 加 1\n  如果 序号 等于 5 那么\n    继续\n  结束\n  如果 序号 大于 7 那么\n    跳出\n  结束\n  和 = 和 加 序号\n结束\n和";
+        assert_eq!(run_source(src).unwrap(), Object::Int(23));
+    }
+
+    #[test]
+    fn 跳出只能出现在循环内() {
+        let (program, _) = parse_program("跳出");
+        let result = compile_program(&program);
+        assert!(result.is_err_and(|msg| msg.contains("跳出")));
+    }
+
+    #[test]
+    fn 继续只能出现在循环内() {
+        let (program, _) = parse_program("继续");
+        let result = compile_program(&program);
+        assert!(result.is_err_and(|msg| msg.contains("继续")));
+    }
 }
