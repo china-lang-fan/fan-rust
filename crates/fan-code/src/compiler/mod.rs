@@ -196,6 +196,15 @@ impl Compiler {
                 self.builder.emit(Opcode::SetIndex);
                 Ok(())
             }
+            Stmt::FieldAssign(a) => {
+                self.line(a.pos.line as u32);
+                // 栈布局：对象、值依次压栈，成员名取常量池。
+                self.compile_expr(&a.object)?;
+                self.compile_expr(&a.value)?;
+                let name_idx = self.add_string_const(&a.name);
+                self.builder.emit(Opcode::SetMember(name_idx));
+                Ok(())
+            }
             other => Err(format!(
                 "字节码编译器暂不支持的语句：{}",
                 stmt_kind_name(other)
@@ -491,6 +500,13 @@ impl Compiler {
                 Ok(())
             }
             Expr::Function(f) => self.compile_function_literal(f),
+            Expr::Member(m) => {
+                self.line(m.pos.line as u32);
+                self.compile_expr(&m.object)?;
+                let name_idx = self.add_string_const(&m.name);
+                self.builder.emit(Opcode::GetMember(name_idx));
+                Ok(())
+            }
             Expr::Tuple(t) => {
                 self.line(t.pos.line as u32);
                 for element in &t.elements {

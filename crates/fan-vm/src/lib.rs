@@ -215,6 +215,40 @@ mod tests {
     }
 
     #[test]
+    fn 字典成员访问与下标等价() {
+        let src = "变量 表 = {\"宽\": 3, \"高\": 4}\n表.宽";
+        assert_eq!(run_source(src).unwrap(), Object::Int(3));
+        let src2 = "变量 表 = {\"宽\": 3, \"高\": 4}\n表 的 高";
+        assert_eq!(run_source(src2).unwrap(), Object::Int(4));
+    }
+
+    #[test]
+    fn 字典成员赋值() {
+        let src = "变量 表 = {\"宽\": 3}\n表.宽 = 30\n表[\"宽\"]";
+        assert_eq!(run_source(src).unwrap(), Object::Int(30));
+        let src2 = "变量 表 = {}\n表.新键 = 7\n表.新键";
+        assert_eq!(run_source(src2).unwrap(), Object::Int(7));
+    }
+
+    #[test]
+    fn 字典缺失成员报错() {
+        assert!(run_source("变量 表 = {}\n表.无").is_err());
+    }
+
+    #[test]
+    fn 成员访问参与运算与函数() {
+        let src = "变量 表 = {\"宽\": 3, \"高\": 4}\n表.宽 乘 表.高";
+        assert_eq!(run_source(src).unwrap(), Object::Int(12));
+        let src2 = "函数 面积(任意 表)\n  返回 表.宽 乘 表.高\n结束\n面积({\"宽\": 5, \"高\": 6})";
+        assert_eq!(run_source(src2).unwrap(), Object::Int(30));
+    }
+
+    #[test]
+    fn 非容器成员访问报错() {
+        assert!(run_source("变量 甲 = 1\n甲.字段").is_err());
+    }
+
+    #[test]
     fn 数组与字符串切片() {
         let src = "变量 组 = [1, 2, 3, 4]\n组[1:3]";
         match run_source(src).unwrap() {

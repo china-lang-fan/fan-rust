@@ -270,6 +270,20 @@ impl<'m> Vm<'m> {
                     let result = self.get_slice(&target, &low, &high)?;
                     self.stack.push(result);
                 }
+                Opcode::GetMember(_) => {
+                    let idx = self.read_u16(&chunk)? as usize;
+                    let name = self.string_const(&chunk, idx)?;
+                    let object = self.pop_operand()?;
+                    let value = self.get_member(&object, &name)?;
+                    self.stack.push(value);
+                }
+                Opcode::SetMember(_) => {
+                    let idx = self.read_u16(&chunk)? as usize;
+                    let name = self.string_const(&chunk, idx)?;
+                    let value = self.pop_operand()?;
+                    let object = self.pop_operand()?;
+                    self.set_member(&object, &name, value)?;
+                }
                 Opcode::ForStep(..) => {
                     let tag = self.read_u8(&chunk)?;
                     let iter_slot = self.read_u16(&chunk)? as usize;
@@ -493,6 +507,40 @@ impl<'m> Vm<'m> {
                 Ok(())
             }
             other => Err(VmError::new(format!("{} 不支持下标赋值", other.kind()))),
+        }
+    }
+
+    /// 成员读取：字典按键（键优先）、实例按自身字段。
+    ///
+    /// M3 仅覆盖数据成员；方法分派、嵌入提升与命名类型方法在后续里程碑接入。
+    fn get_member(&self, object: &Object, name: &str) -> VmResult<Object> {
+        match object.unwrap_named() {
+            Object::Dict(dict) => {
+                if let Some(v) = dict.get(&Object::string(name)) {
+                    return Ok(v);
+                }
+                Err(VmError::new(format!("字典不存在键 {name}")))
+            }
+            Object::Instance(inst) => match inst.get(name) {
+                Some(v) => Ok(v),
+                None => Err(VmError::new(format!("{} 没有字段 {name}", inst.class.name))),
+            },
+            other => Err(VmError::new(format!("{} 不支持成员访问", other.kind()))),
+        }
+    }
+
+    /// 成员写入：字典按键写入、实例写自身字段。
+    fn set_member(&self, object: &Object, name: &str, value: Object) -> VmResult<()> {
+        match object.unwrap_named() {
+            Object::Dict(mut dict) => {
+                dict.set(Object::string(name), value);
+                Ok(())
+            }
+            Object::Instance(inst) => {
+                inst.set(name, value);
+                Ok(())
+            }
+            other => Err(VmError::new(format!("{} 不支持字段赋值", other.kind()))),
         }
     }
 
