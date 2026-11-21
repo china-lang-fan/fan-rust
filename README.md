@@ -1,6 +1,7 @@
 # fan-rust
 
-凡语言的 Rust 实现：词法分析、语法分析、求值器、对象系统与命令行工具。
+凡语言的 Rust 实现：词法分析、语法分析、两套执行引擎（tree 求值器与栈式
+字节码虚拟机）、对象系统与命令行工具。
 
 它是凡语言的两个实现之一，与 Go 版 [`china-lang-fan/fan`](https://github.com/china-lang-fan/fan)
 共用同一份标准库 [`china-lang-fan/fan-sdk`](https://github.com/china-lang-fan/fan-sdk)。
@@ -11,11 +12,15 @@
 cargo build --release
 
 # crate 包名是 fan-cli，产出的可执行文件（语言命令）叫 fan
-./target/release/fan 运行 脚本.凡      # 执行脚本
-./target/release/fan 测试 ../fan-sdk   # 跑标准库测试
+./target/release/fan 运行 脚本.凡                       # 默认 tree 求值器
+./target/release/fan 运行 脚本.凡 --engine=vm           # 切换到字节码虚拟机
+./target/release/fan 测试 ../fan-sdk                    # 跑标准库测试
 ./target/release/fan 版本
 ./target/release/fan 帮助
 ```
+
+`--engine`（中文别名 `--引擎`）取值 `tree`/`树` 或 `vm`/`虚拟机`，缺省为
+`tree`。两引擎语义对齐，VM 暂时不支持的特性会显式回退或报错，不静默分歧。
 
 `导入 "编码"` 这类模块引用，按以下顺序查找：脚本所在目录 → 环境变量
 `FAN_SDK` → 可执行文件旁 → 系统安装位置。标准库不在本仓库内，本机开发时
@@ -34,19 +39,49 @@ cargo build --release
 
 ## 仓库结构
 
-按依赖分层，单向依赖：`ast → object → native/eval → cli`。
+按依赖分层、单向依赖。底层是 `ast → object`；其上并列两套执行引擎：
+tree 求值器 `fan-eval` 与「`fan-code` 编译 + `fan-vm` 执行」的字节码引擎；
+最外层是装配它们的 `fan-cli` 与工具链。
 
 | crate | 职责 |
 | --- | --- |
 | `fan-ast` | 抽象语法树节点与类型定义 |
 | `fan-lexer` | 词法分析器与记号定义 |
 | `fan-parser` | 语法分析器（Pratt 解析） |
-| `fan-object` | 对象系统、运行环境、内建函数表 |
-| `fan-eval` | 求值器（语句、表达式、模型、异常） |
+| `fan-object` | 对象系统、运行环境、内建函数表、`Runtime` |
 | `fan-native` | 原生函数库，**只依赖标准库** |
+| `fan-eval` | tree 求值器（直接遍历 AST：语句、表达式、模型、异常） |
+| `fan-code` | 字节码编译器：操作码契约、`ModuleChunk`、反汇编、`.fanc` 序列化，**只依赖标准库、不引用 AST 执行逻辑** |
+| `fan-vm` | 栈式字节码虚拟机：取指-译码-执行，**不依赖 parser/AST/fan-eval**，原生能力经 `Runtime` 接入 |
+| `fan-analysis` | 静态分析（LSP 与编译期检查共用） |
+| `fan-lsp` | 语言服务器（LSP） |
+| `fan-mod` | 模块/依赖管理工具（`fan mod`） |
 | `fan-testrun` | `*_测试.凡` 的收集与运行 |
-| `fan-cli` | 命令行入口（crate 包名；产出的可执行文件为 `fan`） |
+| `fan-cli` | 命令行入口（crate 包名；产出的可执行文件为 `fan`），负责装配两引擎与双引擎对拍 |
 | `fan-ext-*` | 扩展库（依赖第三方库，编译为动态库按需加载） |
+
+## 两套执行引擎
+
+同一份源码、同一个 `Object` 对象系统和 `Runtime` 原生表之上，并挂两套引擎：
+
+```text
+                 ┌──────────────→ fan-eval（tree 求值器，直接遍历 AST）
+fan-parser → AST ┤
+                 └──→ fan-code 编译 → ModuleChunk ──→ fan-vm（栈式 VM 取指执行）
+                                          │
+                                          └── 序列化 → target/**.fanc（魔数 FANC）
+```
+
+- **tree 引擎（默认）**：`fan-eval` 直接递归遍历 AST，结构直观、是语义基线。
+- **VM 引擎（`--engine=vm`）**：`fan-code` 先把 AST 编译成 `ModuleChunk`
+  （一组 `#[repr(u8)]` 操作码 + 常量池），`fan-vm` 在值栈与帧上执行；可序列化为
+  `.fanc`/`.凡码` 产物缓存。VM 复用 `fan-object` 的值与 `Runtime` 原生能力，
+  不重复实现宿主功能，也不依赖 `fan-eval`。
+
+字节码有独立版本号（当前 `BYTECODE_VERSION = 7`，魔数 `b"FANC"`）：操作码只
+追加不重排，加载时版本不符会拒绝旧产物并回退到源码重编译。完整的架构、操作码
+表、闭包/异常/标签/类型运行期机制与对拍方法，见
+[`docs/字节码虚拟机.md`](./docs/字节码虚拟机.md)。
 
 ## 标签与本地绑定
 
