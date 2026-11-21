@@ -22,6 +22,10 @@ use crate::vm_function::{SharedRegistry, VmFunctionRegistry};
 /// 主模块在模块表中的固定标识。
 pub const MAIN_MODULE: ModuleId = 0;
 
+/// 栈展开哨兵消息：`崩溃了` 触发的控制流用它与真实 VM 错误区分，
+/// 沿调用帧上溯时每帧先执行自己的 `稍后` 队列。
+const THROW_SENTINEL: &str = "__vm_throw__";
+
 /// 跨 VM 共享的模块表：模块 ID → 模块块（持有所有权）。
 pub type SharedModules = Rc<RefCell<HashMap<ModuleId, Rc<ModuleChunk>>>>;
 
@@ -50,6 +54,9 @@ pub struct Vm<'m> {
     primitive_method_registry: HashMap<(String, String), (ModuleId, u16)>,
     /// 模块加载器；遇到 LoadModule 时按路径解析。未注入则导入语句报错。
     loader: Option<Box<dyn ModuleLoader>>,
+    /// 当前沿调用栈传播的崩溃值（`崩溃了` 抛出的规范错误对象）。
+    /// 栈展开期间一直保留，直到某帧 `稍后` 中的 `恢复()` 取走（置回 None）。
+    pending_throw: Option<Object>,
     /// 主模块借用的生命周期标记（兼容既有 `Vm::new(&module, ..)` 签名）。
     _marker: std::marker::PhantomData<&'m ()>,
 }
@@ -73,6 +80,7 @@ impl<'m> Vm<'m> {
             method_registry: HashMap::new(),
             primitive_method_registry: HashMap::new(),
             loader: None,
+            pending_throw: None,
             _marker: std::marker::PhantomData,
         };
         vm.register_primitive_methods(MAIN_MODULE, &main);
@@ -141,7 +149,15 @@ impl<'m> Vm<'m> {
         self.frames.push(Frame::entry(module_id, base));
         let result = self.execute();
         self.frames.pop();
-        result
+        match result {
+            Err(e) if e.message == THROW_SENTINEL => {
+                // 一路无人 恢复：把哨兵转成对外的「未恢复的崩溃」错误。
+                let thrown = self.pending_throw.clone().unwrap_or(Object::Nil);
+                self.pending_throw = None;
+                Err(VmError::new(format!("未恢复的崩溃：{}", thrown.inspect())))
+            }
+            other => other,
+        }
     }
 
     /// 读取最近一次入口执行后、入口槽位 `slot` 中的值（供模块加载器回收导出）。
@@ -285,6 +301,14 @@ impl<'m> Vm<'m> {
                 Opcode::Return => {
                     return Ok(self.stack.last().cloned().unwrap_or(Object::Nil));
                 }
+                Opcode::ReturnLocal(_) => {
+                    let slot = self.read_u16(&chunk)? as usize;
+                    let frame = self.frames.last().ok_or_else(|| VmError::new("无调用帧"))?;
+                    let abs = frame.slot_base + slot;
+                    // 记录返回值来源槽：帧退出执行完 稍后 后据此重读，纳入 defer 改写。
+                    self.frames.last_mut().expect("帧存在").return_slot = Some(abs);
+                    return Ok(self.slots.get(abs).cloned().unwrap_or(Object::Nil));
+                }
                 Opcode::MakeClosure(_) => {
                     let index = self.read_u16(&chunk)?;
                     let module_id = self
@@ -327,7 +351,20 @@ impl<'m> Vm<'m> {
                         .pop()
                         .ok_or_else(|| VmError::new("StoreUpvalue 时值栈为空"))?;
                     let cell = self.frame_upvalue(idx)?;
-                    *cell.borrow_mut() = value;
+                    *cell.borrow_mut() = value.clone();
+                    // 写穿透：该 cell 若同时是某外层帧的 open upvalue，则同步回
+                    // 其源头局部槽，使外层函数直接读局部变量（如 返回 数）能看到
+                    // 嵌套闭包经 upvalue 的写入；帧退出时槽→cell 回写也不再覆盖。
+                    let cell_ptr = Rc::as_ptr(&cell) as usize;
+                    for frame in self.frames.iter() {
+                        if let Some((abs_pos, _)) = frame.open_upvalues.iter().find(|(pos, up)| {
+                            *pos != usize::MAX && Rc::as_ptr(up) as usize == cell_ptr
+                        }) {
+                            if let Some(slot) = self.slots.get_mut(*abs_pos) {
+                                *slot = value.clone();
+                            }
+                        }
+                    }
                 }
                 Opcode::Call(_) => {
                     let argc = self.read_u8(&chunk)? as usize;
@@ -656,6 +693,43 @@ impl<'m> Vm<'m> {
                         .map_err(|e| self.decorate(&chunk, e))?;
                     self.stack.push(result);
                 }
+                Opcode::Throw => {
+                    // `崩溃了(描述)`：弹出描述值，构造携带调用栈的规范错误对象，
+                    // 记入 pending_throw 并以哨兵错误触发栈展开。
+                    let raw = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| VmError::new("崩溃了 缺少错误描述"))?;
+                    let message = match &raw {
+                        Object::Str(s) => s.to_string(),
+                        other => other.inspect(),
+                    };
+                    let mut value = fan_object::ErrorValue::new(message);
+                    let stack = self.runtime.borrow().stack();
+                    if !stack.is_empty() {
+                        value.stack = stack;
+                    }
+                    self.pending_throw = Some(Object::Error(Rc::new(RefCell::new(value))));
+                    return Err(VmError::new(THROW_SENTINEL));
+                }
+                Opcode::Recover => {
+                    // `恢复()`：取走当前待恢复的崩溃值（取走即视为已处理，停止传播）。
+                    let value = self.pending_throw.clone().unwrap_or(Object::Nil);
+                    self.pending_throw = None;
+                    self.stack.push(value);
+                }
+                Opcode::RegisterDefer => {
+                    // 弹出栈顶零参延迟闭包，登记到当前函数帧的 稍后 队列。
+                    let closure = self
+                        .stack
+                        .pop()
+                        .ok_or_else(|| VmError::new("RegisterDefer 时缺少延迟闭包"))?;
+                    let frame = self
+                        .frames
+                        .last_mut()
+                        .ok_or_else(|| VmError::new("稍后 只能在函数内使用"))?;
+                    frame.defers.push(crate::frame::Deferred { closure });
+                }
                 other => {
                     let line = self.line_at(&chunk, self.frames.last().expect("帧存在"));
                     return Err(
@@ -805,7 +879,39 @@ impl<'m> Vm<'m> {
         // 这些句柄来自外层，abs_pos 用哨兵标记，帧退出时不做关闭处理。
         frame.open_upvalues = upvalues.into_iter().map(|up| (usize::MAX, up)).collect();
         self.frames.push(frame);
-        let result = self.execute()?;
+        let exec_result = self.execute();
+
+        // 判断是否为 `崩溃了` 触发的栈展开（区别于真实 VM 错误）。
+        let is_throw = matches!(&exec_result, Err(e) if e.message == THROW_SENTINEL);
+        // 后进先出执行本帧登记的 稍后 闭包；仅在有抛出时才可能出现 恢复()。
+        // 必须在弹出本帧之前执行：defer 闭包经 upvalue 写本帧局部槽时，写穿透
+        // 逻辑要在帧栈中找到本帧的 open upvalue，提前 pop 会让更新丢失。
+        let mut caught = false;
+        if self
+            .frames
+            .last()
+            .map(|f| !f.defers.is_empty())
+            .unwrap_or(false)
+        {
+            let before = self.pending_throw.clone();
+            while let Some(deferred) = self.frames.last_mut().expect("函数帧存在").defers.pop()
+            {
+                self.call_value_zero(deferred.closure)?;
+            }
+            // 恢复() 会把 pending_throw 取走：取走即本帧已接管，停止继续上抛。
+            if is_throw && before.is_some() && self.pending_throw.is_none() {
+                caught = true;
+            }
+        }
+
+        // 返回 标识符 记录的来源槽：defer 执行后该槽已含最新值，truncate 前先取出，
+        // 用它覆盖 ReturnLocal 在 defer 之前读出的旧返回值。
+        let return_slot_value = self
+            .frames
+            .last()
+            .and_then(|f| f.return_slot)
+            .and_then(|abs| self.slots.get(abs).cloned());
+
         let mut finished = self.frames.pop().expect("函数帧存在");
         // 关闭本帧创建的 open upvalue（abs_pos 非哨兵）：把对应局部槽当前值搬进
         // cell，使闭包在槽位回收后仍持有该变量；来自外层的入参 upvalue 原样保留。
@@ -818,8 +924,38 @@ impl<'m> Vm<'m> {
         }
         // 回收本帧槽位。
         self.slots.truncate(base);
-        self.stack.push(result);
-        Ok(())
+
+        match exec_result {
+            Ok(mut result) => {
+                if let Some(updated) = return_slot_value {
+                    result = updated;
+                }
+                self.stack.push(result);
+                Ok(())
+            }
+            Err(_) if is_throw && caught => {
+                // 抛出已被本帧 稍后 中的 恢复() 接管：函数正常返回空值，不再上抛。
+                self.stack.push(Object::Nil);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// 以零个实参调用一个字节码闭包（供 `稍后` 队列执行），丢弃其返回值。
+    fn call_value_zero(&mut self, callee: Object) -> VmResult<()> {
+        let closure = self.functions.borrow().lookup(&callee);
+        if let Some(closure) = closure {
+            let module_id = closure.module_id;
+            let index = closure.function_index;
+            let upvalues = closure.upvalues.clone();
+            drop(closure);
+            return self.invoke_bytecode_function(module_id, index, upvalues, Vec::new());
+        }
+        match callee {
+            Object::Builtin(builtin) => self.invoke_builtin(&builtin, Vec::new()),
+            other => Err(VmError::new(format!("稍后 项不可调用：{}", other.kind()))),
+        }
     }
 
     fn push_call_result(&mut self, values: Vec<Object>) {
@@ -1074,6 +1210,7 @@ impl<'m> Vm<'m> {
                 }
                 Err(VmError::new(format!("字典不存在键 {name}")))
             }
+            Object::Error(cell) => self.error_member(&cell.borrow(), name),
             Object::Instance(inst) => {
                 // 嵌入子实例优先（如 w.动物），再做沿嵌入链的字段提升查找。
                 if let Some(embed) = inst.embed_by_name(name) {
@@ -1127,6 +1264,39 @@ impl<'m> Vm<'m> {
                 }
                 Err(VmError::new(format!("{} 不支持成员访问", other.kind())))
             }
+        }
+    }
+
+    /// 错误对象成员：与树遍历求值器 `error_member` 保持一致。
+    fn error_member(&self, err: &fan_object::ErrorValue, name: &str) -> VmResult<Object> {
+        match name {
+            "消息" => Ok(Object::string(err.message.clone())),
+            "错误码" | "码" => Ok(Object::string(err.code.clone())),
+            "详情" => match &err.details {
+                Some(d) => Ok(Object::Dict(d.clone())),
+                None => Ok(Object::Dict(fan_object::FanDict::new())),
+            },
+            "原因" => match &err.cause {
+                Some(cause) => Ok(Object::Error(Rc::new(RefCell::new((**cause).clone())))),
+                None => Ok(Object::Nil),
+            },
+            "调用栈" => {
+                let frames: Vec<Object> = err
+                    .stack
+                    .iter()
+                    .map(|f| {
+                        let mut d = fan_object::FanDict::new();
+                        d.set(Object::string("函数"), Object::string(f.function.clone()));
+                        d.set(Object::string("文件"), Object::string(f.file.clone()));
+                        d.set(Object::string("行"), Object::int(f.line as i64));
+                        d.set(Object::string("列"), Object::int(f.column as i64));
+                        Object::Dict(d)
+                    })
+                    .collect();
+                Ok(Object::array(frames))
+            }
+            "追踪" => Ok(Object::string(err.trace())),
+            _ => Err(VmError::new(format!("错误 没有成员 {name}"))),
         }
     }
 

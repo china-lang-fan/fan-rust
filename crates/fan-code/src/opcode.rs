@@ -121,6 +121,11 @@ pub enum Opcode {
     /// 复合字面量实例化：类名取常量池 `[u16]`，字段对数 `[u8]`；
     /// 栈布局自下而上为 字段名、字段值 交替，栈顶为类对象。构造零值实例后按名填字段。
     NewInstance(u16, u8) = 47,
+    /// 弹出栈顶的零参闭包，登记到当前函数帧的 `稍后` 队列（返回/崩溃时按后进先出执行）。
+    RegisterDefer = 48,
+    /// 从局部槽 `[u16]` 读取返回值（仅用于 `返回 标识符`）：记录槽位，
+    /// 使帧退出时执行的 `稍后` 若改写该局部变量，返回值能反映最新值。
+    ReturnLocal(u16) = 49,
 }
 
 /// [`Opcode::ForStep`] 的可迭代对象类型标签。
@@ -153,8 +158,8 @@ impl Opcode {
             | Opcode::SpreadDict
             | Opcode::BuildArrayMarked
             | Opcode::BuildDictMarked
-            | Opcode::CallMarked => 0,
-
+            | Opcode::CallMarked
+            | Opcode::RegisterDefer => 0,
             Opcode::Const(_)
             | Opcode::LoadLocal(_)
             | Opcode::StoreLocal(_)
@@ -173,7 +178,8 @@ impl Opcode {
             | Opcode::UnaryOp(_)
             | Opcode::UnpackTuple(_)
             | Opcode::CallNativeMarked(_)
-            | Opcode::BindClass(_) => 2,
+            | Opcode::BindClass(_)
+            | Opcode::ReturnLocal(_) => 2,
 
             Opcode::Jump(_) | Opcode::JumpIfFalse(_) | Opcode::JumpIfTrue(_) => 4,
 
@@ -244,6 +250,8 @@ impl Opcode {
             45 => Some(Opcode::CallNativeMarked(0)),
             46 => Some(Opcode::BindClass(0)),
             47 => Some(Opcode::NewInstance(0, 0)),
+            48 => Some(Opcode::RegisterDefer),
+            49 => Some(Opcode::ReturnLocal(0)),
             _ => None,
         }
     }

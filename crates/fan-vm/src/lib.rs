@@ -683,4 +683,92 @@ mod tests {
                     \"x\".包装(\"(\")\n";
         assert_eq!(run_source(src2).unwrap(), Object::string("(x]"));
     }
+
+    #[test]
+    fn 稍后按后进先出在函数返回前执行() {
+        let src = "定义 本地(\"append\") 函数 追加(数组 记录, 任意 项)\n 返回 空\n结束\n\
+                    函数 执行()\n 变量 记录 = []\n\
+                    稍后 函数()\n 记录 = 追加(记录, \"第二\")\n 结束\n\
+                    稍后 函数()\n 记录 = 追加(记录, \"第一\")\n 结束\n\
+                    返回 记录\n结束\n执行()\n";
+        assert_eq!(
+            run_with_natives(src).unwrap(),
+            Object::array(vec![Object::string("第一"), Object::string("第二")])
+        );
+    }
+
+    #[test]
+    fn 稍后的实参取登记时刻的值() {
+        let src = "定义 本地(\"append\") 函数 追加(数组 记录, 任意 项)\n 返回 空\n结束\n\
+                    变量 抓到 = []\n\
+                    函数 接收(任意 项)\n 抓到 = 追加(抓到, 项)\n结束\n\
+                    函数 执行()\n 变量 文本 = \"旧\"\n\
+                    稍后 接收(文本)\n 文本 = \"新\"\n结束\n\
+                    执行()\n 抓到\n";
+        assert_eq!(
+            run_with_natives(src).unwrap(),
+            Object::array(vec![Object::string("旧")])
+        );
+    }
+
+    #[test]
+    fn 稍后支持函数字面量并按后进先出执行() {
+        let src = "定义 本地(\"append\") 函数 追加(数组 记录, 任意 项)\n 返回 空\n结束\n\
+                    函数 执行()\n 变量 记录 = []\n\
+                    稍后 函数()\n 记录 = 追加(记录, \"第二\")\n 结束\n\
+                    稍后 函数()\n 记录 = 追加(记录, \"第一\")\n 结束\n\
+                    返回 记录\n结束\n执行()\n";
+        assert_eq!(
+            run_with_natives(src).unwrap(),
+            Object::array(vec![Object::string("第一"), Object::string("第二")])
+        );
+    }
+
+    #[test]
+    fn 崩溃被稍后中的恢复接管并可读错误消息() {
+        let src = "变量 拿到 = 空\n\
+                    函数 执行()\n\
+                    稍后 函数()\n 拿到 = 恢复()\n 结束\n\
+                    崩溃了(\"磁盘满\")\n结束\n\
+                    执行()\n 拿到.消息\n";
+        assert_eq!(run_with_natives(src).unwrap(), Object::string("磁盘满"));
+    }
+
+    #[test]
+    fn 未恢复的崩溃向上抛到顶层并报错() {
+        let src = "函数 执行()\n 崩溃了(\"炸了\")\n结束\n执行()\n";
+        let err = run_with_natives(src).unwrap_err();
+        assert!(err.message.contains("未恢复的崩溃"), "实际：{err}");
+        assert!(err.message.contains("炸了"), "实际：{err}");
+    }
+
+    #[test]
+    fn 错误对象成员访问() {
+        let src = "定义 本地(\"error\") 函数 错误(任意 消息)\n 返回 空\n结束\n\
+                    变量 e = 错误(\"磁盘满\")\ne.消息\n";
+        assert_eq!(run_with_natives(src).unwrap(), Object::string("磁盘满"));
+    }
+
+    #[test]
+    fn 外层稍后恢复内层上抛的崩溃且稍后顺序正确() {
+        let src = "定义 本地(\"append\") 函数 追加(数组 记录, 任意 项)\n 返回 空\n结束\n\
+                    变量 记录 = []\n\
+                    函数 加记录(任意 项)\n 记录 = 追加(记录, 项)\n结束\n\
+                    函数 内层()\n\
+                    稍后 加记录(\"内层\")\n\
+                    崩溃了(\"x\")\n结束\n\
+                    函数 外层()\n\
+                    稍后 加记录(\"外层\")\n\
+                    稍后 函数()\n 变量 e = 恢复()\n 加记录(e.消息)\n 结束\n\
+                    内层()\n结束\n\
+                    外层()\n 记录\n";
+        assert_eq!(
+            run_with_natives(src).unwrap(),
+            Object::array(vec![
+                Object::string("内层"),
+                Object::string("x"),
+                Object::string("外层"),
+            ])
+        );
+    }
 }

@@ -304,16 +304,26 @@ impl<'p> Compiler<'p> {
                     [] => {
                         let nil = self.builder.add_constant(ConstValue::Nil);
                         self.builder.emit(Opcode::Const(nil));
+                        self.builder.emit(Opcode::Return);
                     }
-                    [single] => self.compile_expr(single)?,
+                    // `返回 局部标识符`：发 ReturnLocal 记录槽位，使帧退出时执行的
+                    // 稍后 若改写该局部变量，返回值能反映最新值（对齐 tree 语义）。
+                    [Expr::Ident(id)] if self.scope.resolve(&id.name).is_some() => {
+                        let slot = self.scope.resolve(&id.name).expect("已确认命中局部");
+                        self.builder.emit(Opcode::ReturnLocal(slot));
+                    }
+                    [single] => {
+                        self.compile_expr(single)?;
+                        self.builder.emit(Opcode::Return);
+                    }
                     many => {
                         for e in many {
                             self.compile_expr(e)?;
                         }
                         self.builder.emit(Opcode::BuildTuple(many.len() as u16));
+                        self.builder.emit(Opcode::Return);
                     }
                 }
-                self.builder.emit(Opcode::Return);
                 Ok(())
             }
             Stmt::Break(_) => {
@@ -377,6 +387,7 @@ impl<'p> Compiler<'p> {
             }
             Stmt::Class(c) => self.compile_class(c),
             Stmt::MethodDef(m) => self.compile_method_def(m),
+            Stmt::Defer(d) => self.compile_defer(d),
             other => Err(format!(
                 "字节码编译器暂不支持的语句：{}",
                 stmt_kind_name(other)
@@ -845,6 +856,30 @@ impl<'p> Compiler<'p> {
 
     fn compile_call(&mut self, call: &fan_ast::expr::CallExpr) -> CompileResult<()> {
         self.line(call.pos.line as u32);
+        // 异常控制流关键字：恢复() 取当前待恢复错误；崩溃了(描述) 抛规范错误对象。
+        // 仅在名字未被局部/upvalue 绑定时生效（用户自定义同名函数优先），与 tree 对齐。
+        if let fan_ast::expr::Expr::Ident(id) = &*call.callee {
+            let bound =
+                self.scope.resolve(&id.name).is_some() || self.resolve_upvalue(&id.name)?.is_some();
+            if !bound && id.name == "恢复" {
+                if !call.args.is_empty() {
+                    return Err("恢复 不接受参数".to_string());
+                }
+                self.builder.emit(Opcode::Recover);
+                return Ok(());
+            }
+            if !bound && id.name == "崩溃了" {
+                if call.args.len() != 1 {
+                    return Err(format!(
+                        "崩溃了 需要 1 个参数（错误描述），实际 {} 个",
+                        call.args.len()
+                    ));
+                }
+                self.compile_expr(&call.args[0])?;
+                self.builder.emit(Opcode::Throw);
+                return Ok(());
+            }
+        }
         // 原生别名：`定义 本地` 声明的凡语函数名直接映射到 Runtime 原生 spec。
         let native_spec = if let fan_ast::expr::Expr::Ident(id) = &*call.callee {
             self.native_aliases.borrow().get(&id.name).cloned()
@@ -1085,6 +1120,93 @@ impl<'p> Compiler<'p> {
             function_index,
             primitive: m.primitive,
         });
+        Ok(())
+    }
+
+    /// 编译 `稍后 表达式`：把延迟工作包成一个零参闭包登记到当前函数帧。
+    ///
+    /// 两种形态与树遍历求值器一致：
+    /// - `稍后 f(实参…)`：实参在**登记时刻**就求值（保留此刻的值），被调用者
+    ///   仍在执行时才解析，避免把无参方法提前调用。实现上把每个实参值提升为
+    ///   外层局部槽，延迟闭包经 upvalue 读取后再调用。
+    /// - `稍后 函数() … 结束`：直接把函数字面量编译为延迟闭包，执行时零参调用。
+    fn compile_defer(&mut self, d: &fan_ast::stmt::DeferStmt) -> CompileResult<()> {
+        self.line(d.pos.line as u32);
+        // 调用形态的实参在登记时刻求值并提升为外层合成临时槽（按名声明，
+        // 供子闭包经 upvalue 按名解析），执行时刻取回此刻保存的值。
+        let mut arg_temp_names: Vec<String> = Vec::new();
+        if let Expr::Call(call) = &d.call {
+            for (idx, arg) in call.args.iter().enumerate() {
+                if matches!(arg, Expr::Spread(_)) {
+                    return Err("稍后 调用暂不支持展开实参 ...".to_string());
+                }
+                self.compile_expr(arg)?;
+                let temp = format!("__稍后实参{}_{}__", d.pos.line, idx);
+                let slot = self.scope.declare(&temp);
+                self.builder.emit(Opcode::StoreLocal(slot));
+                arg_temp_names.push(temp);
+            }
+        }
+        let mut child = self.child();
+        match &d.call {
+            Expr::Function(_) => {
+                // 函数字面量：在子编译器里直接编译该表达式并零参调用。
+                child.compile_expr(&d.call)?;
+                child.builder.emit(Opcode::Call(0));
+                child.builder.emit(Opcode::Pop);
+            }
+            Expr::Call(call) => {
+                // 执行时刻：经 upvalue 取回登记时刻的实参值，再解析被调用者并调用。
+                for temp in &arg_temp_names {
+                    let up = child
+                        .resolve_upvalue(temp)?
+                        .ok_or_else(|| "稍后 实参提升为 upvalue 失败".to_string())?;
+                    child.builder.emit(Opcode::LoadUpvalue(up));
+                }
+                // 原生别名与 compile_call 入口对齐：命中则直接发 CallNative，
+                // 避免把别名当普通标识符经 upvalue/全局解析成空值。
+                let native_spec = if let Expr::Ident(id) = &*call.callee {
+                    self.native_aliases.borrow().get(&id.name).cloned()
+                } else {
+                    None
+                };
+                if let Some(spec) = native_spec {
+                    let spec_idx = child.add_string_const(&spec);
+                    child
+                        .builder
+                        .emit(Opcode::CallNative(spec_idx, call.args.len() as u8));
+                } else {
+                    child.compile_expr(&call.callee)?;
+                    child.builder.emit(Opcode::Call(call.args.len() as u8));
+                }
+                child.builder.emit(Opcode::Pop);
+            }
+            other => {
+                return Err(format!(
+                    "稍后 只支持函数调用或函数字面量，实际是 {}",
+                    expr_kind_name(other)
+                ));
+            }
+        }
+        let nil = child.builder.add_constant(ConstValue::Nil);
+        child.builder.emit(Opcode::Const(nil));
+        child.builder.emit(Opcode::Return);
+
+        let chunk = FunctionChunk {
+            name: "<稍后>".to_string(),
+            arity: Arity {
+                fixed: 0,
+                variadic: false,
+                optional: 0,
+            },
+            params: Vec::new(),
+            body: child.builder.build(),
+            upvalues: child.upvalues,
+        };
+        let index = self.functions.borrow().len() as u16;
+        self.functions.borrow_mut().push(chunk);
+        self.builder.emit(Opcode::MakeClosure(index));
+        self.builder.emit(Opcode::RegisterDefer);
         Ok(())
     }
 

@@ -76,6 +76,8 @@ fn decode_instruction(code: &[u8], start: usize) -> Result<(Opcode, usize), Stri
         Opcode::CallNativeMarked(_) => Opcode::CallNativeMarked(u16_at(0)),
         Opcode::BindClass(_) => Opcode::BindClass(u16_at(0)),
         Opcode::NewInstance(_, _) => Opcode::NewInstance(u16_at(0), operand[2]),
+        Opcode::RegisterDefer => Opcode::RegisterDefer,
+        Opcode::ReturnLocal(_) => Opcode::ReturnLocal(u16_at(0)),
     };
     Ok((op, 1 + operand_size))
 }
@@ -146,6 +148,8 @@ fn render(op: &Opcode, chunk: &Chunk) -> String {
         Opcode::CallNativeMarked(i) => format!("CALL_NATIVE_MARKED {i} ；{}", const_str(*i)),
         Opcode::BindClass(i) => format!("BIND_CLASS {i}"),
         Opcode::NewInstance(i, n) => format!("NEW_INSTANCE {i} fields={n}"),
+        Opcode::RegisterDefer => "REGISTER_DEFER".to_string(),
+        Opcode::ReturnLocal(i) => format!("RETURN_LOCAL slot={i}"),
         other => format!("{other:?}"),
     }
 }
