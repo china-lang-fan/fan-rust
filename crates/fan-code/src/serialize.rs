@@ -5,8 +5,8 @@
 //! 魔数错误时拒绝加载，由上层回退到源码重新编译。
 
 use crate::chunk::{
-    Arity, Chunk, ClassChunk, ConstValue, FunctionChunk, MethodChunk, ModuleChunk, UpvalueDesc,
-    BYTECODE_VERSION, MAGIC,
+    Arity, Chunk, ClassChunk, ConstValue, FunctionChunk, InterfaceChunk, InterfaceMethodChunk,
+    MethodChunk, ModuleChunk, UpvalueDesc, BYTECODE_VERSION, MAGIC,
 };
 
 /// 序列化错误。
@@ -253,6 +253,8 @@ impl FunctionChunk {
         for p in &self.params {
             w.string(p);
         }
+        write_string_list(w, &self.param_types);
+        write_string_list(w, &self.return_types);
         self.body.write(w);
         w.u32(self.upvalues.len() as u32);
         for u in &self.upvalues {
@@ -268,6 +270,8 @@ impl FunctionChunk {
         for _ in 0..param_len {
             params.push(r.string()?);
         }
+        let param_types = read_string_list(r)?;
+        let return_types = read_string_list(r)?;
         let body = Chunk::read(r)?;
         let up_len = r.u32()? as usize;
         let mut upvalues = Vec::with_capacity(up_len);
@@ -278,8 +282,68 @@ impl FunctionChunk {
             name,
             arity,
             params,
+            param_types,
+            return_types,
             body,
             upvalues,
+        })
+    }
+}
+
+fn write_string_list(w: &mut Writer, items: &[String]) {
+    w.u32(items.len() as u32);
+    for item in items {
+        w.string(item);
+    }
+}
+
+fn read_string_list(r: &mut Reader) -> CodeResult<Vec<String>> {
+    let len = r.u32()? as usize;
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        out.push(r.string()?);
+    }
+    Ok(out)
+}
+
+impl InterfaceMethodChunk {
+    fn write(&self, w: &mut Writer) {
+        w.string(&self.name);
+        write_string_list(w, &self.param_types);
+        write_string_list(w, &self.return_types);
+    }
+
+    fn read(r: &mut Reader) -> CodeResult<InterfaceMethodChunk> {
+        Ok(InterfaceMethodChunk {
+            name: r.string()?,
+            param_types: read_string_list(r)?,
+            return_types: read_string_list(r)?,
+        })
+    }
+}
+
+impl InterfaceChunk {
+    fn write(&self, w: &mut Writer) {
+        w.string(&self.name);
+        write_string_list(w, &self.embeds);
+        w.u32(self.methods.len() as u32);
+        for m in &self.methods {
+            m.write(w);
+        }
+    }
+
+    fn read(r: &mut Reader) -> CodeResult<InterfaceChunk> {
+        let name = r.string()?;
+        let embeds = read_string_list(r)?;
+        let method_len = r.u32()? as usize;
+        let mut methods = Vec::with_capacity(method_len);
+        for _ in 0..method_len {
+            methods.push(InterfaceMethodChunk::read(r)?);
+        }
+        Ok(InterfaceChunk {
+            name,
+            embeds,
+            methods,
         })
     }
 }
@@ -354,6 +418,10 @@ impl ModuleChunk {
         for m in &self.methods {
             m.write(w);
         }
+        w.u32(self.interfaces.len() as u32);
+        for i in &self.interfaces {
+            i.write(w);
+        }
         w.u32(self.exports.len() as u32);
         for e in &self.exports {
             w.string(e);
@@ -386,6 +454,11 @@ impl ModuleChunk {
         for _ in 0..method_len {
             methods.push(MethodChunk::read(r)?);
         }
+        let iface_len = r.u32()? as usize;
+        let mut interfaces = Vec::with_capacity(iface_len);
+        for _ in 0..iface_len {
+            interfaces.push(InterfaceChunk::read(r)?);
+        }
         let export_len = r.u32()? as usize;
         let mut exports = Vec::with_capacity(export_len);
         for _ in 0..export_len {
@@ -408,6 +481,7 @@ impl ModuleChunk {
             functions,
             classes,
             methods,
+            interfaces,
             exports,
             imports,
             top_slots,

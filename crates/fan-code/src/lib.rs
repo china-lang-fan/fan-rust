@@ -52,6 +52,8 @@ mod tests {
                     optional: 0,
                 },
                 params: vec!["数".to_string()],
+                param_types: Vec::new(),
+                return_types: Vec::new(),
                 body: fn_body.build(),
                 upvalues: vec![UpvalueDesc {
                     name: "外层".to_string(),
@@ -63,6 +65,7 @@ mod tests {
             imports: vec!["依赖/问候包/库/问候".to_string()],
             classes: Vec::new(),
             methods: Vec::new(),
+            interfaces: Vec::new(),
             top_slots: vec![("加倍".to_string(), 0)],
         }
     }

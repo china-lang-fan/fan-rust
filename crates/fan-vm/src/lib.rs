@@ -771,4 +771,96 @@ mod tests {
             ])
         );
     }
+
+    #[test]
+    fn 是关键字判定基本类型与模型接口() {
+        let src = "接口 说话者\n 方法 说话() -> 字符串\n结束\n\
+                    定义 模型 石狗\n 属性 字符串 名\n结束\n\
+                    定义 石狗 的 方法 说话() -> 字符串\n 返回 \"石汪\"\n结束\n\
+                    变量 谁 = 石狗{名: \"石\"}\n\
+                    变量 结果 = [谁 是 石狗, 谁 是 说话者, 谁 是 字符串, \"x\" 是 字符串, 1 是 整数]\n\
+                    结果\n";
+        assert_eq!(
+            run_source(src).unwrap(),
+            Object::array(vec![
+                Object::Bool(true),
+                Object::Bool(true),
+                Object::Bool(false),
+                Object::Bool(true),
+                Object::Bool(true),
+            ])
+        );
+    }
+
+    #[test]
+    fn 是关键字对空值满足任意接口() {
+        let src = "接口 说话者\n 方法 说话() -> 字符串\n结束\n\
+                    变量 谁 = 空\n 谁 是 说话者\n";
+        assert_eq!(run_source(src).unwrap(), Object::Bool(true));
+    }
+
+    #[test]
+    fn 转为接口成功返回值与真() {
+        let src = "接口 说话者\n 方法 说话() -> 字符串\n结束\n\
+                    定义 模型 石狗\n 属性 字符串 名\n结束\n\
+                    定义 石狗 的 方法 说话() -> 字符串\n 返回 \"石汪\"\n结束\n\
+                    变量 s、ok = 石狗{名: \"石\"} 转为 说话者\n [s.说话(), ok]\n";
+        assert_eq!(
+            run_source(src).unwrap(),
+            Object::array(vec![Object::string("石汪"), Object::Bool(true)])
+        );
+    }
+
+    #[test]
+    fn 转为接口失败返回空与假() {
+        let src = "接口 说话者\n 方法 说话() -> 字符串\n结束\n\
+                    变量 n、ok = 42 转为 说话者\n [n, ok]\n";
+        assert_eq!(
+            run_source(src).unwrap(),
+            Object::array(vec![Object::Nil, Object::Bool(false)])
+        );
+    }
+
+    #[test]
+    fn 转为基本类型按值转换() {
+        let src = "变量 n、ok1 = \"42\" 转为 整数\n\
+                    变量 s、ok2 = 65 转为 字符串\n\
+                    变量 bad、ok3 = \"abc\" 转为 整数\n\
+                    [n, ok1, s, ok2, bad, ok3]\n";
+        assert_eq!(
+            run_source(src).unwrap(),
+            Object::array(vec![
+                Object::Int(42),
+                Object::Bool(true),
+                Object::string("65"),
+                Object::Bool(true),
+                Object::Nil,
+                Object::Bool(false),
+            ])
+        );
+    }
+
+    #[test]
+    fn 嵌入接口展平后满足判定() {
+        let src = "接口 说话者\n 方法 说话() -> 字符串\n结束\n\
+                    接口 命名者\n 方法 取名() -> 字符串\n结束\n\
+                    接口 有名的说话者\n 嵌入 说话者\n 嵌入 命名者\n结束\n\
+                    定义 模型 鹦鹉\n 属性 字符串 名\n结束\n\
+                    定义 鹦鹉 的 方法 说话() -> 字符串\n 返回 \"你好\"\n结束\n\
+                    定义 鹦鹉 的 方法 取名() -> 字符串\n 返回 自己.名\n结束\n\
+                    变量 鸟 = 鹦鹉{名: \"小彩\"}\n 鸟 是 有名的说话者\n";
+        assert_eq!(run_source(src).unwrap(), Object::Bool(true));
+    }
+
+    #[test]
+    fn 原生类型扩展方法满足接口() {
+        let src = "接口 可问候\n 方法 问候() -> 字符串\n结束\n\
+                    定义 字符串 的 方法 问候() -> 字符串\n 返回 \"你好，\" 加 自己\n结束\n\
+                    定义 本地(\"append\") 函数 追加(数组 记录, 任意 项)\n 返回 空\n结束\n\
+                    变量 记录 = []\n 记录 = 追加(记录, \"凡\" 是 可问候)\n 记录\n";
+        assert_eq!(
+            run_with_natives(src).unwrap(),
+            Object::array(vec![Object::Bool(true)])
+        );
+    }
 }

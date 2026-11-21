@@ -9,7 +9,7 @@ use crate::opcode::Opcode;
 /// 魔数：凡语言编译产物（`.fanc` / `.凡码`）的文件头标识。
 pub const MAGIC: [u8; 4] = *b"FANC";
 /// 字节码格式版本。破坏性变更时 +1，旧产物将被拒绝并回退源码重编译。
-pub const BYTECODE_VERSION: u16 = 3;
+pub const BYTECODE_VERSION: u16 = 4;
 /// 项目清单文件名，用于上溯定位项目根（与 fan-mod 的约定保持一致）。
 pub const MANIFEST_MARKER: &str = "fan.toml";
 
@@ -66,6 +66,10 @@ pub struct FunctionChunk {
     pub arity: Arity,
     /// 参数名，顺序与固定参数一致，供调试与局部槽位分配参考。
     pub params: Vec<String>,
+    /// 各参数的声明类型名（空串表示未标注 any），与 params 对齐；用于接口签名比对。
+    pub param_types: Vec<String>,
+    /// 返回值声明类型名（空串表示未标注），用于接口签名比对。
+    pub return_types: Vec<String>,
     pub body: Chunk,
     pub upvalues: Vec<UpvalueDesc>,
 }
@@ -81,6 +85,8 @@ pub struct ModuleChunk {
     pub classes: Vec<ClassChunk>,
     /// 模块内定义的模型方法，`BindClass` 之后由 VM 装配到字节码方法表。
     pub methods: Vec<MethodChunk>,
+    /// 模块内声明的接口（纯元数据），VM 链接模块时注册到 Runtime 并展平嵌入。
+    pub interfaces: Vec<InterfaceChunk>,
     /// 导出的顶层绑定名。
     pub exports: Vec<String>,
     /// 静态记录的导入模块路径（实际加载策略由运行时决定）。
@@ -117,6 +123,28 @@ pub struct MethodChunk {
     pub function_index: u16,
     /// 是否为基本类型（字符串/数组等）扩展方法；VM 按接收者运行时类型登记。
     pub primitive: bool,
+}
+
+/// 接口方法签名（无函数体）的可序列化形态。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct InterfaceMethodChunk {
+    /// 方法名。
+    pub name: String,
+    /// 参数声明类型名（空串表示未标注），按声明顺序。
+    pub param_types: Vec<String>,
+    /// 返回值声明类型名（空串表示未标注）。
+    pub return_types: Vec<String>,
+}
+
+/// 接口声明编译产物：纯元数据，运行期由 VM 注册到 Runtime 做结构化满足判定。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct InterfaceChunk {
+    /// 接口名。
+    pub name: String,
+    /// 嵌入的接口名，VM 注册时递归展平。
+    pub embeds: Vec<String>,
+    /// 自身声明的方法签名。
+    pub methods: Vec<InterfaceMethodChunk>,
 }
 
 impl Chunk {
@@ -169,7 +197,9 @@ impl ChunkBuilder {
             | Opcode::UnpackTuple(v)
             | Opcode::CallNativeMarked(v)
             | Opcode::BindClass(v)
-            | Opcode::ReturnLocal(v) => self.chunk.code.extend_from_slice(&v.to_le_bytes()),
+            | Opcode::ReturnLocal(v)
+            | Opcode::TypeTest(v)
+            | Opcode::TypeCast(v) => self.chunk.code.extend_from_slice(&v.to_le_bytes()),
             Opcode::Jump(v) | Opcode::JumpIfFalse(v) | Opcode::JumpIfTrue(v) => {
                 self.chunk.code.extend_from_slice(&v.to_le_bytes())
             }

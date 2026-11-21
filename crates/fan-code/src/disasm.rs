@@ -78,6 +78,8 @@ fn decode_instruction(code: &[u8], start: usize) -> Result<(Opcode, usize), Stri
         Opcode::NewInstance(_, _) => Opcode::NewInstance(u16_at(0), operand[2]),
         Opcode::RegisterDefer => Opcode::RegisterDefer,
         Opcode::ReturnLocal(_) => Opcode::ReturnLocal(u16_at(0)),
+        Opcode::TypeTest(_) => Opcode::TypeTest(u16_at(0)),
+        Opcode::TypeCast(_) => Opcode::TypeCast(u16_at(0)),
     };
     Ok((op, 1 + operand_size))
 }
@@ -150,6 +152,8 @@ fn render(op: &Opcode, chunk: &Chunk) -> String {
         Opcode::NewInstance(i, n) => format!("NEW_INSTANCE {i} fields={n}"),
         Opcode::RegisterDefer => "REGISTER_DEFER".to_string(),
         Opcode::ReturnLocal(i) => format!("RETURN_LOCAL slot={i}"),
+        Opcode::TypeTest(i) => format!("TYPE_TEST name_const={i}"),
+        Opcode::TypeCast(i) => format!("TYPE_CAST name_const={i}"),
         other => format!("{other:?}"),
     }
 }

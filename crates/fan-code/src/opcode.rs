@@ -126,6 +126,10 @@ pub enum Opcode {
     /// 从局部槽 `[u16]` 读取返回值（仅用于 `返回 标识符`）：记录槽位，
     /// 使帧退出时执行的 `稍后` 若改写该局部变量，返回值能反映最新值。
     ReturnLocal(u16) = 49,
+    /// `值 是 类型名`：弹出值，按 `[u16]` 字符串常量给出的类型名判定，压入布尔。
+    TypeTest(u16) = 50,
+    /// `值 转为 类型名`：弹出值，按 `[u16]` 类型名转换，压入二元组 `(结果, 是否成功)`。
+    TypeCast(u16) = 51,
 }
 
 /// [`Opcode::ForStep`] 的可迭代对象类型标签。
@@ -179,7 +183,9 @@ impl Opcode {
             | Opcode::UnpackTuple(_)
             | Opcode::CallNativeMarked(_)
             | Opcode::BindClass(_)
-            | Opcode::ReturnLocal(_) => 2,
+            | Opcode::ReturnLocal(_)
+            | Opcode::TypeTest(_)
+            | Opcode::TypeCast(_) => 2,
 
             Opcode::Jump(_) | Opcode::JumpIfFalse(_) | Opcode::JumpIfTrue(_) => 4,
 
@@ -252,6 +258,8 @@ impl Opcode {
             47 => Some(Opcode::NewInstance(0, 0)),
             48 => Some(Opcode::RegisterDefer),
             49 => Some(Opcode::ReturnLocal(0)),
+            50 => Some(Opcode::TypeTest(0)),
+            51 => Some(Opcode::TypeCast(0)),
             _ => None,
         }
     }

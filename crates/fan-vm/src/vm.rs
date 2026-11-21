@@ -84,7 +84,101 @@ impl<'m> Vm<'m> {
             _marker: std::marker::PhantomData,
         };
         vm.register_primitive_methods(MAIN_MODULE, &main);
+        vm.register_interfaces(&main);
         vm
+    }
+
+    /// 登记模块内声明的接口到 Runtime，并递归展平嵌入接口的方法集。
+    ///
+    /// 接口先按原样注册以支持同文件前向引用，再展平嵌入（带环检测、同名签名冲突报错），
+    /// 与 tree 求值器 `eval_interface_stmt`/`flatten_interface` 的两阶段注册一致。
+    fn register_interfaces(&mut self, module: &ModuleChunk) {
+        // 第一阶段：原样注册，使展平能按名解析同模块内前向定义的接口。
+        for chunk in &module.interfaces {
+            let mut iface = fan_object::Interface::new(chunk.name.clone());
+            for m in &chunk.methods {
+                iface.methods.insert(
+                    m.name.clone(),
+                    fan_ast::InterfaceMethodSig {
+                        name: m.name.clone(),
+                        params: Self::sig_params(m),
+                        return_types: Self::sig_types(&m.return_types),
+                        pos: fan_ast::Position::default(),
+                    },
+                );
+            }
+            iface.embeds = chunk.embeds.clone();
+            self.runtime.borrow_mut().register_interface(Rc::new(iface));
+        }
+        // 第二阶段：逐个展平嵌入并覆盖注册。
+        for chunk in &module.interfaces {
+            let mut iface = match self.runtime.borrow().lookup_interface(&chunk.name) {
+                Some(iface) => (*iface).clone(),
+                None => continue,
+            };
+            if self.flatten_interface(&mut iface, &mut Vec::new()).is_ok() {
+                self.runtime.borrow_mut().register_interface(Rc::new(iface));
+            }
+        }
+    }
+
+    /// 把接口方法签名里的参数类型还原为 AST 参数（仅类型参与比对，名字留空）。
+    fn sig_params(m: &fan_code::chunk::InterfaceMethodChunk) -> Vec<fan_ast::Parameter> {
+        m.param_types
+            .iter()
+            .map(|t| fan_ast::Parameter {
+                name: String::new(),
+                type_: fan_ast::DeclType(t.clone()),
+                variadic: false,
+                default: None,
+            })
+            .collect()
+    }
+
+    /// 把字符串类型名列表还原为 AST 声明类型。
+    fn sig_types(types: &[String]) -> Vec<fan_ast::DeclType> {
+        types.iter().map(|t| fan_ast::DeclType(t.clone())).collect()
+    }
+
+    /// 递归展平接口嵌入：把被嵌入接口的方法并入本接口，带环检测与同名签名冲突报错。
+    fn flatten_interface(
+        &self,
+        iface: &mut fan_object::Interface,
+        visiting: &mut Vec<String>,
+    ) -> VmResult<()> {
+        let embed_names = iface.embeds.clone();
+        for embed_name in &embed_names {
+            if visiting.iter().any(|n| n == embed_name) {
+                return Err(VmError::new(format!("检测到接口循环嵌入：{embed_name}")));
+            }
+            let embed = match self.runtime.borrow().lookup_interface(embed_name) {
+                Some(embed) => embed,
+                None => {
+                    return Err(VmError::new(format!(
+                        "接口 {} 嵌入了未定义的接口 {}",
+                        iface.name, embed_name
+                    )));
+                }
+            };
+            visiting.push(embed_name.clone());
+            let mut embed_flat = (*embed).clone();
+            self.flatten_interface(&mut embed_flat, visiting)?;
+            visiting.pop();
+            for (name, method) in embed_flat.methods {
+                if let Some(existing) = iface.methods.get(&name) {
+                    let conflict = fan_object::interface_sig_conflict(existing, &method);
+                    if !conflict.is_empty() {
+                        return Err(VmError::new(format!(
+                            "接口 {} 中方法 {} 的签名冲突（{}）",
+                            iface.name, name, conflict
+                        )));
+                    }
+                    continue;
+                }
+                iface.methods.insert(name, method);
+            }
+        }
+        Ok(())
     }
 
     /// 登记一个模块中全部基本类型扩展方法，按接收者运行时类型标识建索引。
@@ -105,6 +199,7 @@ impl<'m> Vm<'m> {
     pub fn register_module(&mut self, id: ModuleId, module: Rc<ModuleChunk>) {
         // 基本类型扩展方法不依赖 BindClass（其模块可能无任何模型），链接时即登记。
         self.register_primitive_methods(id, &module);
+        self.register_interfaces(&module);
         self.modules.borrow_mut().insert(id, module);
     }
 
@@ -730,6 +825,21 @@ impl<'m> Vm<'m> {
                         .ok_or_else(|| VmError::new("稍后 只能在函数内使用"))?;
                     frame.defers.push(crate::frame::Deferred { closure });
                 }
+                Opcode::TypeTest(_) => {
+                    let idx = self.read_u16(&chunk)? as usize;
+                    let type_name = self.string_const(&chunk, idx)?;
+                    let value = self.pop_operand()?;
+                    let ok = self.value_is_type(&value, &type_name);
+                    self.stack.push(Object::Bool(ok));
+                }
+                Opcode::TypeCast(_) => {
+                    let idx = self.read_u16(&chunk)? as usize;
+                    let type_name = self.string_const(&chunk, idx)?;
+                    let value = self.pop_operand()?;
+                    let (result, ok) = self.type_cast(&value, &type_name);
+                    self.stack
+                        .push(Object::tuple(vec![result, Object::Bool(ok)]));
+                }
                 other => {
                     let line = self.line_at(&chunk, self.frames.last().expect("帧存在"));
                     return Err(
@@ -1197,6 +1307,193 @@ impl<'m> Vm<'m> {
             }
         }
         None
+    }
+
+    /// 判断值是否属于指定类型名。与 tree 求值器 `value_is_type` 规则对齐：
+    /// 基本类型按运行时类型标识；空值满足 空/错误 及任意接口；模型按类名与嵌入链；
+    /// 接口按结构化方法满足判定。
+    fn value_is_type(&self, value: &Object, type_name: &str) -> bool {
+        if let Some(kind) = fan_object::primitive_kind_from_name(type_name) {
+            return fan_object::runtime_type_name(value) == kind;
+        }
+        if matches!(value, Object::Nil) {
+            if matches!(type_name, "空" | "错误") {
+                return true;
+            }
+            return match self.runtime.borrow().lookup_interface(type_name) {
+                Some(iface) => self.interface_satisfied(&iface, value),
+                None => false,
+            };
+        }
+        // 自定义命名类型：身份严格一致（命名类型在类型定义里程碑才会产生，这里先兼容）。
+        if value.type_name().as_deref() == Some(type_name) {
+            return true;
+        }
+        if let Object::Instance(inst) = value {
+            if inst.class.name == type_name || inst.class.has_embed(type_name) {
+                return true;
+            }
+        }
+        match self.runtime.borrow().lookup_interface(type_name) {
+            Some(iface) => self.interface_satisfied(&iface, value),
+            None => false,
+        }
+    }
+
+    /// 结构化接口满足判定：值（穿透命名类型）拥有接口要求的全部方法且签名兼容。
+    /// 空值满足任何接口（由调用方先短路处理）。
+    fn interface_satisfied(&self, iface: &fan_object::Interface, value: &Object) -> bool {
+        if iface.methods.is_empty() || matches!(value, Object::Nil) {
+            return true;
+        }
+        let checked = value.unwrap_named();
+        let checked = &checked;
+        for (name, want) in &iface.methods {
+            let Some(got) = self.method_signature(checked, name) else {
+                return false;
+            };
+            if !self.signature_compatible(want, &got) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// 取某值上指定方法的实现签名（参数类型列表、返回类型列表），无此方法返回 None。
+    /// 模型方法经方法表定位到字节码函数块；基本类型经扩展方法表定位。
+    fn method_signature(&self, value: &Object, name: &str) -> Option<(Vec<String>, Vec<String>)> {
+        let entry = match value {
+            Object::Instance(inst) => self.resolve_method(&inst.class, name),
+            other => {
+                let kind = fan_object::runtime_type_name(other).to_string();
+                self.primitive_method_registry
+                    .get(&(kind, name.to_string()))
+                    .copied()
+            }
+        };
+        let (module_id, fn_index) = entry?;
+        let module = self.modules.borrow();
+        let module = module.get(&module_id)?;
+        let func = module.functions.get(fn_index as usize)?;
+        // 方法的 param_types 首项是隐式接收者 自己（any），接口比对不含接收者，去掉。
+        let mut params = func.param_types.clone();
+        if !params.is_empty() {
+            params.remove(0);
+        }
+        Some((params, func.return_types.clone()))
+    }
+
+    /// 比对接口方法签名与实现签名是否兼容；实现方完全未标注时只比较参数数量。
+    fn signature_compatible(
+        &self,
+        want: &fan_ast::InterfaceMethodSig,
+        got: &(Vec<String>, Vec<String>),
+    ) -> bool {
+        let (got_params, got_returns) = got;
+        let want_params = &want.params;
+        let impl_fully_untyped =
+            got_params.iter().all(|t| t.is_empty()) && got_returns.iter().all(String::is_empty);
+        if impl_fully_untyped {
+            return got_params.len() == want_params.len();
+        }
+        if got_params.len() != want_params.len() {
+            return false;
+        }
+        for (wp, gp) in want_params.iter().zip(got_params.iter()) {
+            if wp.type_.is_any() || gp.is_empty() {
+                continue;
+            }
+            if wp.type_.0 != *gp {
+                return false;
+            }
+        }
+        if want.return_types.is_empty() {
+            return true;
+        }
+        if want.return_types.len() != got_returns.len() {
+            return false;
+        }
+        for (wr, gr) in want.return_types.iter().zip(got_returns.iter()) {
+            if wr.is_any() || gr.is_empty() {
+                continue;
+            }
+            if wr.0 != *gr {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// `值 转为 类型`：成功返回 (转换值, true)，失败返回 (空, false)。
+    fn type_cast(&self, value: &Object, type_name: &str) -> (Object, bool) {
+        // 身份/结构化满足：模型、接口、基本类型同名等，直接原值返回。
+        if self.value_is_type(value, type_name) {
+            return (value.clone(), true);
+        }
+        // 基本类型间按值转换。
+        if let Some(kind) = fan_object::primitive_kind_from_name(type_name) {
+            if let Some(converted) = self.convert_primitive(value, kind) {
+                return (converted, true);
+            }
+        }
+        (Object::Nil, false)
+    }
+
+    /// 基本类型间的值转换，失败返回 None；与 tree 的 convert_to_primitive_kind 对齐。
+    fn convert_primitive(&self, value: &Object, kind: &str) -> Option<Object> {
+        let inner = value.unwrap_named();
+        let v = &inner;
+        if fan_object::runtime_type_name(v) == kind {
+            return Some(v.clone());
+        }
+        match kind {
+            "integer" => match v {
+                Object::Float(f) => Some(Object::Int(*f as i64)),
+                Object::Bool(b) => Some(Object::Int(if *b { 1 } else { 0 })),
+                Object::Byte(b) => Some(Object::Int(*b as i64)),
+                Object::Char(c) => Some(Object::Int(*c as i64)),
+                Object::Str(s) => s.trim().parse::<i64>().ok().map(Object::Int),
+                _ => None,
+            },
+            "float" => match v {
+                Object::Int(i) => Some(Object::Float(*i as f64)),
+                Object::Bool(b) => Some(Object::Float(if *b { 1.0 } else { 0.0 })),
+                Object::Byte(b) => Some(Object::Float(*b as f64)),
+                Object::Char(c) => Some(Object::Float(*c as i64 as f64)),
+                Object::Str(s) => s.trim().parse::<f64>().ok().map(Object::Float),
+                _ => None,
+            },
+            "string" => Some(Object::string(v.inspect())),
+            "byte" => self
+                .integer_like(v)
+                .filter(|n| (0..=255).contains(n))
+                .map(|n| Object::Byte(n as u8)),
+            "char" => match v {
+                Object::Int(i) => u32::try_from(*i)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .map(Object::Char),
+                Object::Byte(b) => Some(Object::Char(*b as char)),
+                _ => None,
+            },
+            "boolean" => match v {
+                Object::Int(i) => Some(Object::Bool(*i != 0)),
+                Object::Bool(_) => Some(v.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// 从整数族取值为 i64，供字节转换范围检查。
+    fn integer_like(&self, value: &Object) -> Option<i64> {
+        match value {
+            Object::Int(i) => Some(*i),
+            Object::Byte(b) => Some(*b as i64),
+            Object::Char(c) => Some(*c as i64),
+            Object::Bool(b) => Some(if *b { 1 } else { 0 }),
+            _ => None,
+        }
     }
 
     fn get_member(&mut self, object: &Object, name: &str) -> VmResult<Object> {

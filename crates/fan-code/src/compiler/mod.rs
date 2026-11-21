@@ -15,7 +15,8 @@ use fan_ast::stmt::Stmt;
 use fan_ast::Program;
 
 use crate::chunk::{
-    Arity, ChunkBuilder, ClassChunk, FunctionChunk, MethodChunk, ModuleChunk, UpvalueDesc,
+    Arity, ChunkBuilder, ClassChunk, FunctionChunk, InterfaceChunk, InterfaceMethodChunk,
+    MethodChunk, ModuleChunk, UpvalueDesc,
 };
 use crate::opcode::Opcode;
 use crate::ConstValue;
@@ -25,11 +26,22 @@ use scope::ScopeTracker;
 /// 编译错误。
 pub type CompileResult<T> = Result<T, String>;
 
+/// 提取参数声明类型名列表（未标注为空串），供接口签名比对序列化。
+fn param_type_names(params: &[fan_ast::Parameter]) -> Vec<String> {
+    params.iter().map(|p| p.type_.0.clone()).collect()
+}
+
+/// 提取返回值声明类型名列表（未标注为空串）。
+fn return_type_names(types: &[fan_ast::DeclType]) -> Vec<String> {
+    types.iter().map(|t| t.0.clone()).collect()
+}
+
 /// 把一份程序（一个源文件）编译为模块块。
 pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
     let functions = Rc::new(RefCell::new(Vec::new()));
     let classes = Rc::new(RefCell::new(Vec::new()));
     let methods = Rc::new(RefCell::new(Vec::new()));
+    let interfaces = Rc::new(RefCell::new(Vec::new()));
     let exports = Rc::new(RefCell::new(Vec::new()));
     let imports = Rc::new(RefCell::new(Vec::new()));
     let native_aliases = Rc::new(RefCell::new(HashMap::new()));
@@ -37,6 +49,7 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
         functions,
         classes,
         methods,
+        interfaces,
         exports,
         imports,
         native_aliases,
@@ -58,6 +71,9 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
     let methods = Rc::try_unwrap(compiler.methods)
         .expect("方法表无其他引用")
         .into_inner();
+    let interfaces = Rc::try_unwrap(compiler.interfaces)
+        .expect("接口表无其他引用")
+        .into_inner();
     let exports = Rc::try_unwrap(compiler.exports)
         .expect("导出表无其他引用")
         .into_inner();
@@ -69,6 +85,7 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
         functions,
         classes,
         methods,
+        interfaces,
         exports,
         imports,
         top_slots: compiler.scope.root_slots(),
@@ -83,6 +100,8 @@ struct Compiler<'p> {
     classes: Rc<RefCell<Vec<ClassChunk>>>,
     /// 模块内共享的模型方法表。
     methods: Rc<RefCell<Vec<MethodChunk>>>,
+    /// 模块内共享的接口元数据表。
+    interfaces: Rc<RefCell<Vec<InterfaceChunk>>>,
     /// 模块导出/导入名，模块内所有函数编译器共享。
     exports: Rc<RefCell<Vec<String>>>,
     imports: Rc<RefCell<Vec<String>>>,
@@ -118,6 +137,7 @@ impl<'p> Compiler<'p> {
         functions: Rc<RefCell<Vec<FunctionChunk>>>,
         classes: Rc<RefCell<Vec<ClassChunk>>>,
         methods: Rc<RefCell<Vec<MethodChunk>>>,
+        interfaces: Rc<RefCell<Vec<InterfaceChunk>>>,
         exports: Rc<RefCell<Vec<String>>>,
         imports: Rc<RefCell<Vec<String>>>,
         native_aliases: Rc<RefCell<HashMap<String, String>>>,
@@ -127,6 +147,7 @@ impl<'p> Compiler<'p> {
             functions,
             classes,
             methods,
+            interfaces,
             exports,
             imports,
             native_aliases,
@@ -146,6 +167,7 @@ impl<'p> Compiler<'p> {
             Rc::clone(&self.functions),
             Rc::clone(&self.classes),
             Rc::clone(&self.methods),
+            Rc::clone(&self.interfaces),
             Rc::clone(&self.exports),
             Rc::clone(&self.imports),
             Rc::clone(&self.native_aliases),
@@ -386,6 +408,7 @@ impl<'p> Compiler<'p> {
                 Ok(())
             }
             Stmt::Class(c) => self.compile_class(c),
+            Stmt::Interface(i) => self.compile_interface(i),
             Stmt::MethodDef(m) => self.compile_method_def(m),
             Stmt::Defer(d) => self.compile_defer(d),
             other => Err(format!(
@@ -738,6 +761,20 @@ impl<'p> Compiler<'p> {
             Expr::Call(call) => self.compile_call(call),
             Expr::Through(t) => self.compile_through(t),
             Expr::Composite(lit) => self.compile_composite(lit),
+            Expr::TypeTest(t) => {
+                self.line(t.pos.line as u32);
+                self.compile_expr(&t.object)?;
+                let name_idx = self.add_string_const(&t.type_name);
+                self.builder.emit(Opcode::TypeTest(name_idx));
+                Ok(())
+            }
+            Expr::TypeCast(t) => {
+                self.line(t.pos.line as u32);
+                self.compile_expr(&t.object)?;
+                let name_idx = self.add_string_const(&t.type_name);
+                self.builder.emit(Opcode::TypeCast(name_idx));
+                Ok(())
+            }
             Expr::ImplicitReceiverCall(c) => self.compile_implicit_receiver_call(c),
             Expr::MaybeCall(maybe) => {
                 self.line(maybe.pos.line as u32);
@@ -1017,6 +1054,38 @@ impl<'p> Compiler<'p> {
         Ok(())
     }
 
+    /// 编译 `接口 X … 结束`：接口是纯结构化类型契约，不产生运行期指令，
+    /// 仅登记元数据供 VM 注册到 Runtime 做 `是`/`转为` 的满足判定；接口名占一个
+    /// 根槽位（值为空），与 tree 求值器声明同名变量保持一致。
+    fn compile_interface(&mut self, i: &fan_ast::stmt::InterfaceStmt) -> CompileResult<()> {
+        self.line(i.pos.line as u32);
+        let methods = i
+            .methods
+            .iter()
+            .map(|m| InterfaceMethodChunk {
+                name: m.name.clone(),
+                param_types: param_type_names(&m.params),
+                return_types: return_type_names(&m.return_types),
+            })
+            .collect();
+        self.interfaces.borrow_mut().push(InterfaceChunk {
+            name: i.name.clone(),
+            embeds: i.embeds.clone(),
+            methods,
+        });
+        let nil = self.builder.add_constant(ConstValue::Nil);
+        self.builder.emit(Opcode::Const(nil));
+        let slot = self.scope.declare_or_reuse_root(&i.name);
+        self.builder.emit(Opcode::StoreLocal(slot));
+        if i.visibility == fan_ast::stmt::Visibility::Public {
+            let mut exports = self.exports.borrow_mut();
+            if !exports.contains(&i.name) {
+                exports.push(i.name.clone());
+            }
+        }
+        Ok(())
+    }
+
     /// 编译复合字面量 `模型{字段: 值, …}`：依次压入字段名常量与字段值，再压入类对象，
     /// 由 NewInstance 在运行期构造零值实例并按名填字段（不调用 初始化，对齐 tree）。
     fn compile_composite(&mut self, lit: &fan_ast::expr::CompositeLit) -> CompileResult<()> {
@@ -1109,6 +1178,13 @@ impl<'p> Compiler<'p> {
                 names.extend(f.params.iter().map(|p| p.name.clone()));
                 names
             },
+            // 隐式接收者 自己 未标注类型（any），与接口签名比对时接收者不计入参数。
+            param_types: {
+                let mut types = vec![String::new()];
+                types.extend(param_type_names(&f.params));
+                types
+            },
+            return_types: return_type_names(&f.return_types),
             body: child.builder.build(),
             upvalues: child.upvalues,
         };
@@ -1200,6 +1276,8 @@ impl<'p> Compiler<'p> {
                 optional: 0,
             },
             params: Vec::new(),
+            param_types: Vec::new(),
+            return_types: Vec::new(),
             body: child.builder.build(),
             upvalues: child.upvalues,
         };
@@ -1294,6 +1372,8 @@ impl<'p> Compiler<'p> {
             name: name.clone(),
             arity,
             params: child.params.clone(),
+            param_types: param_type_names(&f.params),
+            return_types: return_type_names(&f.return_types),
             body: child.builder.build(),
             upvalues: child.upvalues,
         };
