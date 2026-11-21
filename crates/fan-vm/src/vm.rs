@@ -52,6 +52,9 @@ pub struct Vm<'m> {
     /// 基本类型扩展方法表：(运行时类型标识, 方法名) → (所属模块, 函数表索引)。
     /// 运行时类型标识取 fan_object::runtime_type_name（如 string/array），命名类型穿透到底层。
     primitive_method_registry: HashMap<(String, String), (ModuleId, u16)>,
+    /// 自定义命名类型扩展方法表：(命名类型名, 方法名) → (所属模块, 函数表索引)。
+    /// 命名类型方法在成员访问时优先于底层基本类型的同名方法（对齐 tree 查找顺序）。
+    named_method_registry: HashMap<(String, String), (ModuleId, u16)>,
     /// 模块加载器；遇到 LoadModule 时按路径解析。未注入则导入语句报错。
     loader: Option<Box<dyn ModuleLoader>>,
     /// 当前沿调用栈传播的崩溃值（`崩溃了` 抛出的规范错误对象）。
@@ -79,13 +82,25 @@ impl<'m> Vm<'m> {
             class_registry: HashMap::new(),
             method_registry: HashMap::new(),
             primitive_method_registry: HashMap::new(),
+            named_method_registry: HashMap::new(),
             loader: None,
             pending_throw: None,
             _marker: std::marker::PhantomData,
         };
+        // 先登记命名类型，扩展方法登记需据此区分命名类型方法与基本类型方法。
+        vm.register_named_types(&main);
         vm.register_primitive_methods(MAIN_MODULE, &main);
         vm.register_interfaces(&main);
         vm
+    }
+
+    /// 登记模块内声明的自定义命名类型到 Runtime，供 `是`/`转为` 与类型名构造使用。
+    fn register_named_types(&mut self, module: &ModuleChunk) {
+        for chunk in &module.named_types {
+            let base = fan_ast::DeclType(chunk.base_members.join("|"));
+            let nt = fan_object::NamedType::new(chunk.name.clone(), base);
+            self.runtime.borrow_mut().register_named_type(nt);
+        }
     }
 
     /// 登记模块内声明的接口到 Runtime，并递归展平嵌入接口的方法集。
@@ -191,12 +206,25 @@ impl<'m> Vm<'m> {
                         (id, method.function_index),
                     );
                 }
+            } else if self
+                .runtime
+                .borrow()
+                .lookup_named_type(&method.class_name)
+                .is_some()
+            {
+                // 自定义命名类型的扩展方法登记在类型自己的名下，成员访问时优先于底层类型。
+                self.named_method_registry.insert(
+                    (method.class_name.clone(), method.method_name.clone()),
+                    (id, method.function_index),
+                );
             }
         }
     }
 
     /// 注册一个已链接的外部模块块。供模块加载器在执行前/执行中装配。
     pub fn register_module(&mut self, id: ModuleId, module: Rc<ModuleChunk>) {
+        // 先登记命名类型：扩展方法登记需据此区分命名类型方法与基本类型方法。
+        self.register_named_types(&module);
         // 基本类型扩展方法不依赖 BindClass（其模块可能无任何模型），链接时即登记。
         self.register_primitive_methods(id, &module);
         self.register_interfaces(&module);
@@ -840,6 +868,13 @@ impl<'m> Vm<'m> {
                     self.stack
                         .push(Object::tuple(vec![result, Object::Bool(ok)]));
                 }
+                Opcode::NewNamed(_) => {
+                    let idx = self.read_u16(&chunk)? as usize;
+                    let type_name = self.string_const(&chunk, idx)?;
+                    let value = self.pop_operand()?;
+                    let wrapped = self.wrap_named(&type_name, &value)?;
+                    self.stack.push(wrapped);
+                }
                 other => {
                     let line = self.line_at(&chunk, self.frames.last().expect("帧存在"));
                     return Err(
@@ -1325,9 +1360,18 @@ impl<'m> Vm<'m> {
                 None => false,
             };
         }
-        // 自定义命名类型：身份严格一致（命名类型在类型定义里程碑才会产生，这里先兼容）。
+        // 自定义命名类型：身份严格一致。
         if value.type_name().as_deref() == Some(type_name) {
             return true;
+        }
+        // 命名类型（含联合）：联合按任一成员满足，单类型按底层基本类型判定。
+        if let Some(nt) = self.runtime.borrow().lookup_named_type(type_name).cloned() {
+            let inner = value.unwrap_named();
+            return nt.base_type.0.split('|').any(|m| {
+                fan_object::primitive_kind_from_name(m)
+                    .map(|k| fan_object::runtime_type_name(&inner) == k)
+                    .unwrap_or(false)
+            });
         }
         if let Object::Instance(inst) = value {
             if inst.class.name == type_name || inst.class.has_embed(type_name) {
@@ -1426,6 +1470,16 @@ impl<'m> Vm<'m> {
 
     /// `值 转为 类型`：成功返回 (转换值, true)，失败返回 (空, false)。
     fn type_cast(&self, value: &Object, type_name: &str) -> (Object, bool) {
+        // 目标是自定义命名类型：先身份一致直接返回，再按底层类型包装，失败返回 (空,假)。
+        if let Some(nt) = self.runtime.borrow().lookup_named_type(type_name).cloned() {
+            if value.type_name().as_deref() == Some(type_name) {
+                return (value.clone(), true);
+            }
+            return match self.wrap_named_with(&nt, value) {
+                Some(wrapped) => (wrapped, true),
+                None => (Object::Nil, false),
+            };
+        }
         // 身份/结构化满足：模型、接口、基本类型同名等，直接原值返回。
         if self.value_is_type(value, type_name) {
             return (value.clone(), true);
@@ -1437,6 +1491,29 @@ impl<'m> Vm<'m> {
             }
         }
         (Object::Nil, false)
+    }
+
+    /// 命名类型构造 `类型名(值)`：底层类型不满足时报错（对齐 tree convert_to_named）。
+    fn wrap_named(&self, type_name: &str, value: &Object) -> VmResult<Object> {
+        let nt = self
+            .runtime
+            .borrow()
+            .lookup_named_type(type_name)
+            .cloned()
+            .ok_or_else(|| VmError::new(format!("未定义的类型 {type_name}")))?;
+        self.wrap_named_with(&nt, value)
+            .ok_or_else(|| VmError::new(format!("无法转换为 {type_name}")))
+    }
+
+    /// 按命名类型的底层成员校验后包装；联合类型接受任一成员，单类型要求底层种类匹配。
+    fn wrap_named_with(&self, nt: &fan_object::NamedType, value: &Object) -> Option<Object> {
+        let inner = value.unwrap_named();
+        let ok = nt.base_type.0.split('|').any(|m| {
+            fan_object::primitive_kind_from_name(m)
+                .map(|k| fan_object::runtime_type_name(&inner) == k)
+                .unwrap_or(false)
+        });
+        ok.then(|| Object::named(nt.name.clone(), inner))
     }
 
     /// 基本类型间的值转换，失败返回 None；与 tree 的 convert_to_primitive_kind 对齐。
@@ -1497,6 +1574,24 @@ impl<'m> Vm<'m> {
     }
 
     fn get_member(&mut self, object: &Object, name: &str) -> VmResult<Object> {
+        // 自定义命名类型的方法优先于底层基本类型同名方法（对齐 tree 查找顺序）。
+        if let Object::Named(named) = object {
+            if let Some((module_id, fn_index)) = self
+                .named_method_registry
+                .get(&(named.type_name.clone(), name.to_string()))
+                .copied()
+            {
+                let upvalues = self.build_method_upvalues(module_id, fn_index)?;
+                let bound = self.functions.borrow_mut().make_bound_method(
+                    module_id,
+                    fn_index,
+                    name,
+                    object.clone(),
+                    upvalues,
+                );
+                return Ok(bound);
+            }
+        }
         match object.unwrap_named() {
             Object::Module(module) => module.borrow().exports.get(name).cloned().ok_or_else(|| {
                 VmError::new(format!("模块 {} 没有公开成员 {name}", module.borrow().name))

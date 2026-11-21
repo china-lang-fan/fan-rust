@@ -66,6 +66,8 @@ mod tests {
             classes: Vec::new(),
             methods: Vec::new(),
             interfaces: Vec::new(),
+            named_types: Vec::new(),
+            native_exports: Vec::new(),
             top_slots: vec![("加倍".to_string(), 0)],
         }
     }

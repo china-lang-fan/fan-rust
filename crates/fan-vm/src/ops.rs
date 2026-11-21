@@ -29,6 +29,9 @@ fn float(value: &Object) -> Option<f64> {
 }
 
 pub fn apply_binary(op: &str, left: Object, right: Object) -> VmResult<Object> {
+    // 命名类型按底层值参与运算（对齐 tree 求值器，各运算入口先 unwrap_named）。
+    let left = left.unwrap_named();
+    let right = right.unwrap_named();
     match op {
         "+" | "加" => add(left, right),
         "-" | "减" => arithmetic(op, left, right),
@@ -98,6 +101,7 @@ fn bitwise(op: &str, left: Object, right: Object) -> VmResult<Object> {
 }
 
 pub fn apply_unary(op: &str, operand: Object) -> VmResult<Object> {
+    let operand = operand.unwrap_named();
     match op {
         "-" | "负" => match integer(&operand) {
             Some(i) => Ok(Object::Int(-i)),

@@ -130,6 +130,9 @@ pub enum Opcode {
     TypeTest(u16) = 50,
     /// `值 转为 类型名`：弹出值，按 `[u16]` 类型名转换，压入二元组 `(结果, 是否成功)`。
     TypeCast(u16) = 51,
+    /// 命名类型构造：弹出底层值，按 `[u16]` 字符串常量给出的类型名包装为命名类型值；
+    /// 底层类型不满足该命名类型的底层成员时报错（对齐 tree 的 convert_to_named）。
+    NewNamed(u16) = 52,
 }
 
 /// [`Opcode::ForStep`] 的可迭代对象类型标签。
@@ -185,7 +188,8 @@ impl Opcode {
             | Opcode::BindClass(_)
             | Opcode::ReturnLocal(_)
             | Opcode::TypeTest(_)
-            | Opcode::TypeCast(_) => 2,
+            | Opcode::TypeCast(_)
+            | Opcode::NewNamed(_) => 2,
 
             Opcode::Jump(_) | Opcode::JumpIfFalse(_) | Opcode::JumpIfTrue(_) => 4,
 
@@ -260,6 +264,7 @@ impl Opcode {
             49 => Some(Opcode::ReturnLocal(0)),
             50 => Some(Opcode::TypeTest(0)),
             51 => Some(Opcode::TypeCast(0)),
+            52 => Some(Opcode::NewNamed(0)),
             _ => None,
         }
     }

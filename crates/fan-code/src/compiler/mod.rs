@@ -16,7 +16,7 @@ use fan_ast::Program;
 
 use crate::chunk::{
     Arity, ChunkBuilder, ClassChunk, FunctionChunk, InterfaceChunk, InterfaceMethodChunk,
-    MethodChunk, ModuleChunk, UpvalueDesc,
+    MethodChunk, ModuleChunk, NamedTypeChunk, UpvalueDesc,
 };
 use crate::opcode::Opcode;
 use crate::ConstValue;
@@ -42,6 +42,8 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
     let classes = Rc::new(RefCell::new(Vec::new()));
     let methods = Rc::new(RefCell::new(Vec::new()));
     let interfaces = Rc::new(RefCell::new(Vec::new()));
+    let named_types = Rc::new(RefCell::new(Vec::new()));
+    let native_exports = Rc::new(RefCell::new(Vec::new()));
     let exports = Rc::new(RefCell::new(Vec::new()));
     let imports = Rc::new(RefCell::new(Vec::new()));
     let native_aliases = Rc::new(RefCell::new(HashMap::new()));
@@ -50,6 +52,8 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
         classes,
         methods,
         interfaces,
+        named_types,
+        native_exports,
         exports,
         imports,
         native_aliases,
@@ -74,6 +78,12 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
     let interfaces = Rc::try_unwrap(compiler.interfaces)
         .expect("接口表无其他引用")
         .into_inner();
+    let named_types = Rc::try_unwrap(compiler.named_types)
+        .expect("命名类型表无其他引用")
+        .into_inner();
+    let native_exports = Rc::try_unwrap(compiler.native_exports)
+        .expect("原生导出表无其他引用")
+        .into_inner();
     let exports = Rc::try_unwrap(compiler.exports)
         .expect("导出表无其他引用")
         .into_inner();
@@ -86,6 +96,8 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
         classes,
         methods,
         interfaces,
+        named_types,
+        native_exports,
         exports,
         imports,
         top_slots: compiler.scope.root_slots(),
@@ -102,6 +114,10 @@ struct Compiler<'p> {
     methods: Rc<RefCell<Vec<MethodChunk>>>,
     /// 模块内共享的接口元数据表。
     interfaces: Rc<RefCell<Vec<InterfaceChunk>>>,
+    /// 模块内共享的自定义命名类型表。
+    named_types: Rc<RefCell<Vec<NamedTypeChunk>>>,
+    /// 公开导出的原生别名（凡语函数名 → Runtime spec 名），供加载器导出真实 Builtin。
+    native_exports: Rc<RefCell<Vec<(String, String)>>>,
     /// 模块导出/导入名，模块内所有函数编译器共享。
     exports: Rc<RefCell<Vec<String>>>,
     imports: Rc<RefCell<Vec<String>>>,
@@ -133,11 +149,15 @@ struct LoopCtx {
 }
 
 impl<'p> Compiler<'p> {
+    /// 构造编译器实例；模块入口与子函数编译器共用同一组共享表。
+    #[allow(clippy::too_many_arguments)]
     fn new(
         functions: Rc<RefCell<Vec<FunctionChunk>>>,
         classes: Rc<RefCell<Vec<ClassChunk>>>,
         methods: Rc<RefCell<Vec<MethodChunk>>>,
         interfaces: Rc<RefCell<Vec<InterfaceChunk>>>,
+        named_types: Rc<RefCell<Vec<NamedTypeChunk>>>,
+        native_exports: Rc<RefCell<Vec<(String, String)>>>,
         exports: Rc<RefCell<Vec<String>>>,
         imports: Rc<RefCell<Vec<String>>>,
         native_aliases: Rc<RefCell<HashMap<String, String>>>,
@@ -148,6 +168,8 @@ impl<'p> Compiler<'p> {
             classes,
             methods,
             interfaces,
+            named_types,
+            native_exports,
             exports,
             imports,
             native_aliases,
@@ -168,6 +190,8 @@ impl<'p> Compiler<'p> {
             Rc::clone(&self.classes),
             Rc::clone(&self.methods),
             Rc::clone(&self.interfaces),
+            Rc::clone(&self.named_types),
+            Rc::clone(&self.native_exports),
             Rc::clone(&self.exports),
             Rc::clone(&self.imports),
             Rc::clone(&self.native_aliases),
@@ -224,6 +248,14 @@ impl<'p> Compiler<'p> {
                 if is_native {
                     if let Some(Expr::Function(f)) = &d.value {
                         self.compile_expr(&Expr::Function(f.clone()))?;
+                        // 公开的原生别名没有运行期槽值，记录 (凡语名, spec) 供加载器导出 Builtin。
+                        if matches!(d.visibility, fan_ast::stmt::Visibility::Public) {
+                            if let Some(decl) = &f.native {
+                                self.native_exports
+                                    .borrow_mut()
+                                    .push((d.name.clone(), decl.spec.clone()));
+                            }
+                        }
                     }
                     if self.scope.resolve(&d.name).is_none() {
                         self.scope.declare(&d.name);
@@ -409,12 +441,9 @@ impl<'p> Compiler<'p> {
             }
             Stmt::Class(c) => self.compile_class(c),
             Stmt::Interface(i) => self.compile_interface(i),
+            Stmt::TypeDef(t) => self.compile_type_def(t),
             Stmt::MethodDef(m) => self.compile_method_def(m),
             Stmt::Defer(d) => self.compile_defer(d),
-            other => Err(format!(
-                "字节码编译器暂不支持的语句：{}",
-                stmt_kind_name(other)
-            )),
         }
     }
 
@@ -916,6 +945,24 @@ impl<'p> Compiler<'p> {
                 self.builder.emit(Opcode::Throw);
                 return Ok(());
             }
+            // 命名类型构造：`状态(1)`、`姓名("凡")`，类型名不占变量槽，
+            // 仅当未被局部/upvalue 绑定时按命名类型包装处理（用户同名绑定优先）。
+            if !bound && self.is_named_type(&id.name) {
+                if call.args.len() != 1 {
+                    return Err(format!(
+                        "命名类型 {} 构造需要恰好 1 个参数，实际 {} 个",
+                        id.name,
+                        call.args.len()
+                    ));
+                }
+                if matches!(&call.args[0], fan_ast::expr::Expr::Spread(_)) {
+                    return Err("命名类型构造暂不支持展开实参 ...".to_string());
+                }
+                self.compile_expr(&call.args[0])?;
+                let name_idx = self.add_string_const(&id.name);
+                self.builder.emit(Opcode::NewNamed(name_idx));
+                return Ok(());
+            }
         }
         // 原生别名：`定义 本地` 声明的凡语函数名直接映射到 Runtime 原生 spec。
         let native_spec = if let fan_ast::expr::Expr::Ident(id) = &*call.callee {
@@ -1086,6 +1133,36 @@ impl<'p> Compiler<'p> {
         Ok(())
     }
 
+    /// 判断名字是否为本模块声明的自定义命名类型。
+    fn is_named_type(&self, name: &str) -> bool {
+        self.named_types.borrow().iter().any(|t| t.name == name)
+    }
+
+    /// 编译 `定义 类型 名 = 底层类型`：命名类型是纯类型身份，不产生运行期指令，
+    /// 仅登记元数据供 VM 注册到 Runtime；类型名不占变量槽（它作为构造调用被特判）。
+    fn compile_type_def(&mut self, t: &fan_ast::stmt::TypeDefStmt) -> CompileResult<()> {
+        self.line(t.pos.line as u32);
+        let base_members: Vec<String> = t
+            .base_type
+            .members()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let is_union = t.base_type.is_union();
+        self.named_types.borrow_mut().push(NamedTypeChunk {
+            name: t.name.clone(),
+            base_members,
+            is_union,
+        });
+        if t.visibility == fan_ast::stmt::Visibility::Public {
+            let mut exports = self.exports.borrow_mut();
+            if !exports.contains(&t.name) {
+                exports.push(t.name.clone());
+            }
+        }
+        Ok(())
+    }
+
     /// 编译复合字面量 `模型{字段: 值, …}`：依次压入字段名常量与字段值，再压入类对象，
     /// 由 NewInstance 在运行期构造零值实例并按名填字段（不调用 初始化，对齐 tree）。
     fn compile_composite(&mut self, lit: &fan_ast::expr::CompositeLit) -> CompileResult<()> {
@@ -1123,22 +1200,34 @@ impl<'p> Compiler<'p> {
     fn compile_method_def(&mut self, m: &fan_ast::stmt::MethodDef) -> CompileResult<()> {
         self.line(m.pos.line as u32);
         let f = &m.function;
+        // 方法可把接收者显式写成首个形参（`问候(任意 自己)`）：它复用槽 0 且不占实参位，
+        // 与 tree 求值器一致；未显式写接收者时仍由隐式 `自己` 占槽 0。
+        let explicit_self = f
+            .params
+            .first()
+            .map(|p| p.name == m.receiver_name)
+            .unwrap_or(false);
+        let body_params: Vec<&fan_ast::Parameter> = if explicit_self {
+            f.params.iter().skip(1).collect()
+        } else {
+            f.params.iter().collect()
+        };
         let mut child = self.child();
-        // 隐式接收者固定占据槽 0，显式参数顺延到槽 1..。
-        child.scope.declare_at("自己", 0);
+        // 接收者固定占据槽 0（显式 自己 或隐式 自己 同名）。
+        child.scope.declare_at(&m.receiver_name, 0);
         let mut fixed_index: u16 = 1;
-        let has_variadic = f.params.iter().any(|p| p.variadic);
-        for param in &f.params {
+        let has_variadic = body_params.iter().any(|p| p.variadic);
+        for param in &body_params {
             if param.variadic {
-                let slot = f.params.len() as u16; // 自己(1 槽) + 显式参数序号
+                let slot = body_params.len() as u16; // 接收者(1 槽) + 显式参数序号
                 child.scope.declare_at(&param.name, slot);
             } else {
                 child.scope.declare_at(&param.name, fixed_index);
                 fixed_index += 1;
             }
         }
-        // 显式参数的默认值序言（槽位整体后移一位以容纳 自己）。
-        for (offset, param) in f.params.iter().enumerate() {
+        // 显式参数的默认值序言（槽位整体后移一位以容纳接收者）。
+        for (offset, param) in body_params.iter().enumerate() {
             if let Some(default) = &param.default {
                 let slot = (offset + 1) as u16;
                 child.line(f.pos.line as u32);
@@ -1164,24 +1253,24 @@ impl<'p> Compiler<'p> {
         child.builder.emit(Opcode::Const(nil));
         child.builder.emit(Opcode::Return);
 
-        let fixed = f.params.iter().filter(|p| !p.variadic).count() + 1;
+        let fixed = body_params.iter().filter(|p| !p.variadic).count() + 1;
         let arity = Arity {
             fixed,
             variadic: has_variadic,
-            optional: f.params.iter().filter(|p| p.default.is_some()).count(),
+            optional: body_params.iter().filter(|p| p.default.is_some()).count(),
         };
         let chunk = FunctionChunk {
             name: format!("{}#{}", m.class_name, m.method_name),
             arity,
             params: {
-                let mut names = vec!["自己".to_string()];
-                names.extend(f.params.iter().map(|p| p.name.clone()));
+                let mut names = vec![m.receiver_name.clone()];
+                names.extend(body_params.iter().map(|p| p.name.clone()));
                 names
             },
-            // 隐式接收者 自己 未标注类型（any），与接口签名比对时接收者不计入参数。
+            // 接收者未标注类型（any），与接口签名比对时接收者不计入参数。
             param_types: {
                 let mut types = vec![String::new()];
-                types.extend(param_type_names(&f.params));
+                types.extend(body_params.iter().map(|p| p.type_.0.clone()));
                 types
             },
             return_types: return_type_names(&f.return_types),
@@ -1545,36 +1634,6 @@ impl<'p> Compiler<'p> {
         } else {
             Ok(None)
         }
-    }
-}
-
-fn stmt_kind_name(stmt: &Stmt) -> &'static str {
-    match stmt {
-        Stmt::VarDecl(_) => "变量声明",
-        Stmt::Assign(_) => "赋值",
-        Stmt::CompoundAssign(_) => "复合赋值",
-        Stmt::MultiDecl(_) => "多目标声明",
-        Stmt::MultiAssign(_) => "多目标赋值",
-        Stmt::Expr(_) => "表达式语句",
-        Stmt::Block(_) => "语句块",
-        Stmt::If(_) => "条件",
-        Stmt::Switch(_) => "判断",
-        Stmt::While(_) => "当循环",
-        Stmt::Repeat(_) => "重复直到循环",
-        Stmt::Times(_) => "重复N次循环",
-        Stmt::ForEach(_) => "遍历循环",
-        Stmt::Break(_) => "跳出",
-        Stmt::Continue(_) => "继续",
-        Stmt::Return(_) => "返回",
-        Stmt::Defer(_) => "稍后",
-        Stmt::Import(_) => "导入",
-        Stmt::Visibility(_) => "可见性修饰",
-        Stmt::Class(_) => "模型",
-        Stmt::MethodDef(_) => "方法定义",
-        Stmt::Interface(_) => "接口",
-        Stmt::TypeDef(_) => "类型定义",
-        Stmt::FieldAssign(_) => "字段赋值",
-        Stmt::IndexAssign(_) => "下标赋值",
     }
 }
 

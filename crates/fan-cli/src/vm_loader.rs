@@ -165,12 +165,13 @@ impl FsModuleLoader {
         };
         let exports = chunk.exports.clone();
         let top_slots = chunk.top_slots.clone();
+        let native_exports = chunk.native_exports.clone();
         let name = module_name(full);
 
         // 子 VM：共享运行时、闭包注册表、模块表，加载器用同核心代理支持嵌套导入。
         // 入口帧以真实模块 id 执行，避免误用主模块（id=0）的入口指令。
         let proxy = self.proxy();
-        let mut vm = Vm::new(&chunk, runtime)
+        let mut vm = Vm::new(&chunk, runtime.clone())
             .with_shared_registry(registry)
             .with_shared_modules(modules)
             .with_loader(Box::new(proxy));
@@ -180,6 +181,13 @@ impl FsModuleLoader {
         // 入口帧已弹出，槽位保留；按入口基址读顶层槽，筛选公开导出。
         let mut module = ModuleValue::new(name);
         for export in &exports {
+            // `定义 公开 本地(...)` 的原生别名不占运行期槽值，直接从 Runtime 取真实 Builtin。
+            if let Some((_, spec)) = native_exports.iter().find(|(alias, _)| alias == export) {
+                if let Some(builtin) = runtime.borrow().lookup_native(spec) {
+                    module.set(export.clone(), Object::Builtin(builtin));
+                    continue;
+                }
+            }
             if let Some((_, slot)) = top_slots.iter().find(|(n, _)| n == export) {
                 let value = vm.entry_slot(base, *slot);
                 module.set(export.clone(), value);

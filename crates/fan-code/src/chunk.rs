@@ -9,7 +9,7 @@ use crate::opcode::Opcode;
 /// 魔数：凡语言编译产物（`.fanc` / `.凡码`）的文件头标识。
 pub const MAGIC: [u8; 4] = *b"FANC";
 /// 字节码格式版本。破坏性变更时 +1，旧产物将被拒绝并回退源码重编译。
-pub const BYTECODE_VERSION: u16 = 4;
+pub const BYTECODE_VERSION: u16 = 5;
 /// 项目清单文件名，用于上溯定位项目根（与 fan-mod 的约定保持一致）。
 pub const MANIFEST_MARKER: &str = "fan.toml";
 
@@ -87,6 +87,11 @@ pub struct ModuleChunk {
     pub methods: Vec<MethodChunk>,
     /// 模块内声明的接口（纯元数据），VM 链接模块时注册到 Runtime 并展平嵌入。
     pub interfaces: Vec<InterfaceChunk>,
+    /// 模块内声明的自定义命名类型，VM 链接模块时注册到 Runtime 并支持类型名构造调用。
+    pub named_types: Vec<NamedTypeChunk>,
+    /// 公开导出的原生别名：(凡语函数名, Runtime 原生 spec 名)。
+    /// `定义 公开 本地(...)` 的别名不占运行期槽值，加载器据此导出真实 Builtin。
+    pub native_exports: Vec<(String, String)>,
     /// 导出的顶层绑定名。
     pub exports: Vec<String>,
     /// 静态记录的导入模块路径（实际加载策略由运行时决定）。
@@ -147,6 +152,17 @@ pub struct InterfaceChunk {
     pub methods: Vec<InterfaceMethodChunk>,
 }
 
+/// 自定义命名类型（`定义 类型 名 = 底层类型`，底层为基本类型或其联合）。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct NamedTypeChunk {
+    /// 类型名。
+    pub name: String,
+    /// 底层类型的成员名（基本类型名）；联合类型含多个，单类型仅一个。
+    pub base_members: Vec<String>,
+    /// 是否为联合命名类型（成员数 ≥ 2）。
+    pub is_union: bool,
+}
+
 impl Chunk {
     pub fn new() -> Self {
         Chunk::default()
@@ -199,7 +215,8 @@ impl ChunkBuilder {
             | Opcode::BindClass(v)
             | Opcode::ReturnLocal(v)
             | Opcode::TypeTest(v)
-            | Opcode::TypeCast(v) => self.chunk.code.extend_from_slice(&v.to_le_bytes()),
+            | Opcode::TypeCast(v)
+            | Opcode::NewNamed(v) => self.chunk.code.extend_from_slice(&v.to_le_bytes()),
             Opcode::Jump(v) | Opcode::JumpIfFalse(v) | Opcode::JumpIfTrue(v) => {
                 self.chunk.code.extend_from_slice(&v.to_le_bytes())
             }

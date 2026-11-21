@@ -6,7 +6,7 @@
 
 use crate::chunk::{
     Arity, Chunk, ClassChunk, ConstValue, FunctionChunk, InterfaceChunk, InterfaceMethodChunk,
-    MethodChunk, ModuleChunk, UpvalueDesc, BYTECODE_VERSION, MAGIC,
+    MethodChunk, ModuleChunk, NamedTypeChunk, UpvalueDesc, BYTECODE_VERSION, MAGIC,
 };
 
 /// 序列化错误。
@@ -348,6 +348,22 @@ impl InterfaceChunk {
     }
 }
 
+impl NamedTypeChunk {
+    fn write(&self, w: &mut Writer) {
+        w.string(&self.name);
+        write_string_list(w, &self.base_members);
+        w.bool(self.is_union);
+    }
+
+    fn read(r: &mut Reader) -> CodeResult<NamedTypeChunk> {
+        Ok(NamedTypeChunk {
+            name: r.string()?,
+            base_members: read_string_list(r)?,
+            is_union: r.bool()?,
+        })
+    }
+}
+
 impl ClassChunk {
     fn write(&self, w: &mut Writer) {
         w.string(&self.name);
@@ -422,6 +438,15 @@ impl ModuleChunk {
         for i in &self.interfaces {
             i.write(w);
         }
+        w.u32(self.named_types.len() as u32);
+        for t in &self.named_types {
+            t.write(w);
+        }
+        w.u32(self.native_exports.len() as u32);
+        for (name, spec) in &self.native_exports {
+            w.string(name);
+            w.string(spec);
+        }
         w.u32(self.exports.len() as u32);
         for e in &self.exports {
             w.string(e);
@@ -459,6 +484,16 @@ impl ModuleChunk {
         for _ in 0..iface_len {
             interfaces.push(InterfaceChunk::read(r)?);
         }
+        let named_len = r.u32()? as usize;
+        let mut named_types = Vec::with_capacity(named_len);
+        for _ in 0..named_len {
+            named_types.push(NamedTypeChunk::read(r)?);
+        }
+        let native_export_len = r.u32()? as usize;
+        let mut native_exports = Vec::with_capacity(native_export_len);
+        for _ in 0..native_export_len {
+            native_exports.push((r.string()?, r.string()?));
+        }
         let export_len = r.u32()? as usize;
         let mut exports = Vec::with_capacity(export_len);
         for _ in 0..export_len {
@@ -482,6 +517,8 @@ impl ModuleChunk {
             classes,
             methods,
             interfaces,
+            named_types,
+            native_exports,
             exports,
             imports,
             top_slots,

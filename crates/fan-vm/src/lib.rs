@@ -863,4 +863,85 @@ mod tests {
             Object::array(vec![Object::Bool(true)])
         );
     }
+
+    #[test]
+    fn 自定义命名类型构造与身份判断() {
+        let src = "类型 状态 整数\n\
+                    变量 s = 状态(1)\n\
+                    [s 是 状态, s 是 整数, s 等于 1]\n";
+        assert_eq!(
+            run_source(src).unwrap(),
+            Object::array(vec![
+                Object::Bool(true),
+                Object::Bool(true),
+                Object::Bool(true),
+            ])
+        );
+    }
+
+    #[test]
+    fn 命名类型严格身份与转为() {
+        let src = "类型 状态 整数\n\
+                    变量 s、ok1 = 1 转为 状态\n\
+                    变量 坏、ok2 = \"x\" 转为 状态\n\
+                    [ok1, s 是 状态, ok2, 坏]\n";
+        assert_eq!(
+            run_source(src).unwrap(),
+            Object::array(vec![
+                Object::Bool(true),
+                Object::Bool(true),
+                Object::Bool(false),
+                Object::Nil,
+            ])
+        );
+    }
+
+    #[test]
+    fn 命名类型按底层参与运算() {
+        let src = "类型 状态 整数\n\
+                    常量 状态 有效 = 状态(1)\n\
+                    [有效 加 1, 有效 等于 1]\n";
+        assert_eq!(
+            run_source(src).unwrap(),
+            Object::array(vec![Object::Int(2), Object::Bool(true)])
+        );
+    }
+
+    #[test]
+    fn 命名类型的扩展方法与底层方法() {
+        let src = "类型 姓名 字符串\n\
+                    定义 姓名 的 方法 问候(任意 自己) -> 字符串\n 返回 \"你好，\" 加 自己\n结束\n\
+                    变量 n = 姓名(\"凡\")\n\
+                    [n.问候(), n 是 姓名, n 是 字符串, n 等于 \"凡\"]\n";
+        assert_eq!(
+            run_source(src).unwrap(),
+            Object::array(vec![
+                Object::string("你好，凡"),
+                Object::Bool(true),
+                Object::Bool(true),
+                Object::Bool(true),
+            ])
+        );
+    }
+
+    #[test]
+    fn 联合命名类型接受任一成员() {
+        let src = "定义 类型 标识 为 整数 或 字符串\n\
+                    变量 a、ok1 = 42 转为 标识\n\
+                    变量 b、ok2 = \"号\" 转为 标识\n\
+                    变量 坏、ok3 = 真 转为 标识\n\
+                    [ok1, a, ok2, b, ok3, 1 是 标识, 真 是 标识]\n";
+        assert_eq!(
+            run_source(src).unwrap(),
+            Object::array(vec![
+                Object::Bool(true),
+                Object::named("标识", Object::Int(42)),
+                Object::Bool(true),
+                Object::named("标识", Object::string("号")),
+                Object::Bool(false),
+                Object::Bool(true),
+                Object::Bool(false),
+            ])
+        );
+    }
 }
