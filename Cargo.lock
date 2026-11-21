@@ -62,7 +62,7 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "fan-analysis"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fan-ast",
  "fan-native",
@@ -71,11 +71,11 @@ dependencies = [
 
 [[package]]
 name = "fan-ast"
-version = "0.8.0"
+version = "0.9.0"
 
 [[package]]
 name = "fan-cli"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fan-analysis",
  "fan-ast",
@@ -93,14 +93,14 @@ dependencies = [
 
 [[package]]
 name = "fan-code"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fan-ast",
 ]
 
 [[package]]
 name = "fan-eval"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fan-ast",
  "fan-lexer",
@@ -112,14 +112,14 @@ dependencies = [
 
 [[package]]
 name = "fan-lexer"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fan-ast",
 ]
 
 [[package]]
 name = "fan-lsp"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fan-analysis",
  "fan-ast",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "fan-mod"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "serde",
  "toml",
@@ -137,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "fan-native"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fan-ast",
  "fan-object",
@@ -149,14 +149,14 @@ dependencies = [
 
 [[package]]
 name = "fan-object"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fan-ast",
 ]
 
 [[package]]
 name = "fan-parser"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fan-ast",
  "fan-lexer",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "fan-testrun"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fan-ast",
  "fan-eval",
@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "fan-vm"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fan-ast",
  "fan-code",
