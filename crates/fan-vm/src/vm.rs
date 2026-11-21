@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use fan_code::chunk::{Chunk, ModuleChunk};
 use fan_code::opcode::Opcode;
-use fan_object::{Builtin, Object, Runtime};
+use fan_object::{Builtin, Object, Runtime, TagContextValue};
 
 use crate::error::{VmError, VmResult};
 use crate::frame::Frame;
@@ -875,6 +875,17 @@ impl<'m> Vm<'m> {
                     let wrapped = self.wrap_named(&type_name, &value)?;
                     self.stack.push(wrapped);
                 }
+                Opcode::ApplyTag(..) => {
+                    let tag_idx = self.read_u16(&chunk)? as usize;
+                    let slot = self.read_u16(&chunk)?;
+                    let argc = self.read_u8(&chunk)? as usize;
+                    let frame_module = self
+                        .frames
+                        .last()
+                        .map(|f| f.module_id)
+                        .unwrap_or(MAIN_MODULE);
+                    self.apply_tag(frame_module, tag_idx, slot, argc)?;
+                }
                 other => {
                     let line = self.line_at(&chunk, self.frames.last().expect("帧存在"));
                     return Err(
@@ -882,6 +893,108 @@ impl<'m> Vm<'m> {
                     );
                 }
             }
+        }
+    }
+
+    /// 应用一个标签到刚绑定到 `slot` 的函数：构造标签模型实例，查 Runtime 中已注册的
+    /// 凡语言处理器并回调；处理器经标签上下文替换实现时，把新可调用值写回该槽。
+    /// 未注册标签静默忽略（对齐 tree 的 apply_fan_tag_handler）。
+    fn apply_tag(
+        &mut self,
+        module_id: ModuleId,
+        tag_idx: usize,
+        slot: u16,
+        argc: usize,
+    ) -> VmResult<()> {
+        let module = self.module_chunk(module_id)?;
+        let tag = module
+            .tags
+            .get(tag_idx)
+            .cloned()
+            .ok_or_else(|| VmError::new(format!("标签表索引 {tag_idx} 越界")))?;
+        // 栈上参数顺序：位置参数（至多一个，写字段 `值`）在前，命名参数值按序在后。
+        let values = self.pop_args(argc)?;
+        let handler = self.runtime.borrow().lookup_fan_tag_handler(&tag.name);
+        let Some(handler_marker) = handler else {
+            return Ok(());
+        };
+        // 构造标签模型实例；解析不到同名模型时为 空（未注册模型不阻断）。
+        let tag_instance = self.build_tag_instance(&tag, &values)?;
+        let frame_base = self.frames.last().map(|f| f.slot_base).unwrap_or(0);
+        let current = self.slot(frame_base, slot as usize);
+        let ctx_value = Rc::new(TagContextValue::new(tag_instance, current.clone()));
+        let context = Object::TagContext(Rc::clone(&ctx_value));
+        // 处理器是 MakeClosure 产出的字节码闭包标记（在闭包身份表可查），按字节码回调。
+        let callee = Object::Func(handler_marker);
+        self.invoke_handler(callee, vec![context])?;
+        if let Some(replacement) = ctx_value.replacement() {
+            let new_value = Object::Func(replacement);
+            let base = self.frames.last().map(|f| f.slot_base).unwrap_or(0);
+            self.set_slot(base, slot as usize, new_value);
+        }
+        Ok(())
+    }
+
+    /// 按标签元数据与已求值参数构造标签模型实例；无同名模型时返回 空。
+    fn build_tag_instance(
+        &mut self,
+        tag: &fan_code::chunk::TagChunk,
+        values: &[Object],
+    ) -> VmResult<Object> {
+        let Some(class) = self.class_registry.get(&tag.name).cloned() else {
+            return Ok(Object::Nil);
+        };
+        // 复用零值实例化，预置全部字段（含嵌入），set_field_value 才能命中同名字段。
+        let inst = self.new_zero_instance(&class)?;
+        let mut cursor = 0usize;
+        if tag.has_positional {
+            let value = values.get(cursor).cloned().unwrap_or(Object::Nil);
+            self.write_tag_field(&inst, &class, "值", value)?;
+            cursor += 1;
+        }
+        for field in &tag.named_names {
+            let value = values.get(cursor).cloned().unwrap_or(Object::Nil);
+            self.write_tag_field(&inst, &class, field, value)?;
+            cursor += 1;
+        }
+        Ok(Object::Instance(inst))
+    }
+
+    /// 写入标签实例字段；模型缺该字段时报错（对齐 tree write_tag_field）。
+    fn write_tag_field(
+        &mut self,
+        inst: &Rc<fan_object::Instance>,
+        class: &Rc<fan_object::Class>,
+        name: &str,
+        value: Object,
+    ) -> VmResult<()> {
+        inst.set_field_value(name, value)
+            .map_err(|_| VmError::new(format!("标签模型 {} 没有字段 {}", class.name, name)))
+    }
+
+    /// 以单参方式调用一个可调用值（标签处理器），复用字节码/内建分派，丢弃返回值。
+    fn invoke_handler(&mut self, callee: Object, args: Vec<Object>) -> VmResult<()> {
+        let closure = self.functions.borrow().lookup(&callee);
+        if let Some(closure) = closure {
+            let module_id = closure.module_id;
+            let index = closure.function_index;
+            let upvalues = closure.upvalues.clone();
+            drop(closure);
+            self.invoke_bytecode_function(module_id, index, upvalues, args)?;
+            // 调用把返回值压在值栈上，处理器的返回值无意义，弹出丢弃。
+            self.stack.pop();
+            return Ok(());
+        }
+        match callee {
+            Object::Builtin(builtin) => {
+                self.invoke_builtin(&builtin, args)?;
+                self.stack.pop();
+                Ok(())
+            }
+            other => Err(VmError::new(format!(
+                "标签处理器不可调用：{}",
+                other.kind()
+            ))),
         }
     }
 
@@ -964,11 +1077,20 @@ impl<'m> Vm<'m> {
     fn call_native(&mut self, name: &str, argc: usize) -> VmResult<()> {
         let args = self.pop_args(argc)?;
         let builtin = self
-            .runtime
-            .borrow()
-            .lookup_native(name)
+            .resolve_native(name)
             .ok_or_else(|| VmError::new(format!("未定义的内建函数：{name}")))?;
         self.invoke_builtin(&builtin, args)
+    }
+
+    /// 解析原生内建：先按完整 spec（如 `tag.tagRegisterHandler`），未命中再按点号后的
+    /// 短名回退（对齐 tree 的 bind_native：ext 内建以短名登记）。
+    fn resolve_native(&self, name: &str) -> Option<Rc<Builtin>> {
+        let runtime = self.runtime.borrow();
+        if let Some(found) = runtime.lookup_native(name) {
+            return Some(found);
+        }
+        name.rsplit_once('.')
+            .and_then(|(_, short)| runtime.lookup_native(short))
     }
 
     fn invoke_builtin(&mut self, builtin: &Rc<Builtin>, args: Vec<Object>) -> VmResult<()> {
@@ -1593,6 +1715,7 @@ impl<'m> Vm<'m> {
             }
         }
         match object.unwrap_named() {
+            Object::TagContext(ctx) => self.tag_context_member(&ctx, name),
             Object::Module(module) => module.borrow().exports.get(name).cloned().ok_or_else(|| {
                 VmError::new(format!("模块 {} 没有公开成员 {name}", module.borrow().name))
             }),
@@ -1656,6 +1779,39 @@ impl<'m> Vm<'m> {
                 }
                 Err(VmError::new(format!("{} 不支持成员访问", other.kind())))
             }
+        }
+    }
+
+    /// 标签上下文成员：`标签`、`当前实现`、`替换实现`（对齐 tree tag_context_member）。
+    /// `替换实现` 返回一个内建函数，处理器调用它即把新实现写回上下文，VM 回调结束后读取。
+    fn tag_context_member(&mut self, ctx: &Rc<TagContextValue>, name: &str) -> VmResult<Object> {
+        match name {
+            "标签" | "Tag" => Ok(ctx.tag()),
+            "当前实现" => Ok(ctx.current()),
+            "替换实现" => {
+                let ctx = Rc::clone(ctx);
+                let func = Builtin::new(
+                    "替换实现",
+                    Some(1),
+                    Rc::new(move |_rt, args| {
+                        let Some(first) = args.into_iter().next() else {
+                            return Err("替换实现 需要 1 个参数".to_string());
+                        };
+                        match first {
+                            Object::Func(f) => {
+                                ctx.replace(f);
+                                Ok(vec![Object::Nil])
+                            }
+                            other => Err(format!(
+                                "替换实现 的参数必须是可调用对象，实际 {}",
+                                other.kind()
+                            )),
+                        }
+                    }),
+                );
+                Ok(Object::Builtin(Rc::new(func)))
+            }
+            _ => Err(VmError::new(format!("标签上下文没有成员 {name}"))),
         }
     }
 

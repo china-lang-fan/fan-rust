@@ -717,14 +717,11 @@ mod tests {
     }
 
     #[test]
-    fn vm遇到仍不支持的语法返回明确错误() {
-        // 标签（装饰器）函数尚未在字节码编译器支持，应给“暂不支持”错误而非 panic。
-        let err = run_engine_captured(
-            "@自定义标记\n定义 函数 被测()\n 返回 空\n结束\n被测()\n",
-            Engine::Vm,
-        )
-        .unwrap_err();
-        assert!(err.contains("暂不支持"), "实际：{err}");
+    fn vm未注册标签静默忽略并与tree一致() {
+        // 未注册标签静默忽略，被标注函数照常执行，双引擎结果一致。
+        assert_engines_agree(
+            "@自定义标记\n定义 函数 被测()\n 返回 7\n结束\n打印行(被测())\n",
+        );
     }
 
     /// 文件级双引擎对拍：在临时目录运行主模块（可含导入），用内存输出 sink

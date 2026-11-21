@@ -183,7 +183,11 @@ impl FsModuleLoader {
         for export in &exports {
             // `定义 公开 本地(...)` 的原生别名不占运行期槽值，直接从 Runtime 取真实 Builtin。
             if let Some((_, spec)) = native_exports.iter().find(|(alias, _)| alias == export) {
-                if let Some(builtin) = runtime.borrow().lookup_native(spec) {
+                let builtin = runtime.borrow().lookup_native(spec).or_else(|| {
+                    spec.rsplit_once('.')
+                        .and_then(|(_, short)| runtime.borrow().lookup_native(short))
+                });
+                if let Some(builtin) = builtin {
                     module.set(export.clone(), Object::Builtin(builtin));
                     continue;
                 }

@@ -6,7 +6,7 @@
 
 use crate::chunk::{
     Arity, Chunk, ClassChunk, ConstValue, FunctionChunk, InterfaceChunk, InterfaceMethodChunk,
-    MethodChunk, ModuleChunk, NamedTypeChunk, UpvalueDesc, BYTECODE_VERSION, MAGIC,
+    MethodChunk, ModuleChunk, NamedTypeChunk, TagChunk, UpvalueDesc, BYTECODE_VERSION, MAGIC,
 };
 
 /// 序列化错误。
@@ -364,6 +364,22 @@ impl NamedTypeChunk {
     }
 }
 
+impl TagChunk {
+    fn write(&self, w: &mut Writer) {
+        w.string(&self.name);
+        write_string_list(w, &self.named_names);
+        w.bool(self.has_positional);
+    }
+
+    fn read(r: &mut Reader) -> CodeResult<TagChunk> {
+        Ok(TagChunk {
+            name: r.string()?,
+            named_names: read_string_list(r)?,
+            has_positional: r.bool()?,
+        })
+    }
+}
+
 impl ClassChunk {
     fn write(&self, w: &mut Writer) {
         w.string(&self.name);
@@ -442,6 +458,10 @@ impl ModuleChunk {
         for t in &self.named_types {
             t.write(w);
         }
+        w.u32(self.tags.len() as u32);
+        for t in &self.tags {
+            t.write(w);
+        }
         w.u32(self.native_exports.len() as u32);
         for (name, spec) in &self.native_exports {
             w.string(name);
@@ -489,6 +509,11 @@ impl ModuleChunk {
         for _ in 0..named_len {
             named_types.push(NamedTypeChunk::read(r)?);
         }
+        let tag_len = r.u32()? as usize;
+        let mut tags = Vec::with_capacity(tag_len);
+        for _ in 0..tag_len {
+            tags.push(TagChunk::read(r)?);
+        }
         let native_export_len = r.u32()? as usize;
         let mut native_exports = Vec::with_capacity(native_export_len);
         for _ in 0..native_export_len {
@@ -518,6 +543,7 @@ impl ModuleChunk {
             methods,
             interfaces,
             named_types,
+            tags,
             native_exports,
             exports,
             imports,

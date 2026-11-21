@@ -16,7 +16,7 @@ use fan_ast::Program;
 
 use crate::chunk::{
     Arity, ChunkBuilder, ClassChunk, FunctionChunk, InterfaceChunk, InterfaceMethodChunk,
-    MethodChunk, ModuleChunk, NamedTypeChunk, UpvalueDesc,
+    MethodChunk, ModuleChunk, NamedTypeChunk, TagChunk, UpvalueDesc,
 };
 use crate::opcode::Opcode;
 use crate::ConstValue;
@@ -43,6 +43,7 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
     let methods = Rc::new(RefCell::new(Vec::new()));
     let interfaces = Rc::new(RefCell::new(Vec::new()));
     let named_types = Rc::new(RefCell::new(Vec::new()));
+    let tags = Rc::new(RefCell::new(Vec::new()));
     let native_exports = Rc::new(RefCell::new(Vec::new()));
     let exports = Rc::new(RefCell::new(Vec::new()));
     let imports = Rc::new(RefCell::new(Vec::new()));
@@ -53,6 +54,7 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
         methods,
         interfaces,
         named_types,
+        tags,
         native_exports,
         exports,
         imports,
@@ -81,6 +83,9 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
     let named_types = Rc::try_unwrap(compiler.named_types)
         .expect("命名类型表无其他引用")
         .into_inner();
+    let tags = Rc::try_unwrap(compiler.tags)
+        .expect("标签表无其他引用")
+        .into_inner();
     let native_exports = Rc::try_unwrap(compiler.native_exports)
         .expect("原生导出表无其他引用")
         .into_inner();
@@ -97,6 +102,7 @@ pub fn compile_program(program: &Program) -> CompileResult<ModuleChunk> {
         methods,
         interfaces,
         named_types,
+        tags,
         native_exports,
         exports,
         imports,
@@ -116,6 +122,8 @@ struct Compiler<'p> {
     interfaces: Rc<RefCell<Vec<InterfaceChunk>>>,
     /// 模块内共享的自定义命名类型表。
     named_types: Rc<RefCell<Vec<NamedTypeChunk>>>,
+    /// 模块内共享的标签（装饰器）表，ApplyTag 以索引引用。
+    tags: Rc<RefCell<Vec<TagChunk>>>,
     /// 公开导出的原生别名（凡语函数名 → Runtime spec 名），供加载器导出真实 Builtin。
     native_exports: Rc<RefCell<Vec<(String, String)>>>,
     /// 模块导出/导入名，模块内所有函数编译器共享。
@@ -157,6 +165,7 @@ impl<'p> Compiler<'p> {
         methods: Rc<RefCell<Vec<MethodChunk>>>,
         interfaces: Rc<RefCell<Vec<InterfaceChunk>>>,
         named_types: Rc<RefCell<Vec<NamedTypeChunk>>>,
+        tags: Rc<RefCell<Vec<TagChunk>>>,
         native_exports: Rc<RefCell<Vec<(String, String)>>>,
         exports: Rc<RefCell<Vec<String>>>,
         imports: Rc<RefCell<Vec<String>>>,
@@ -169,6 +178,7 @@ impl<'p> Compiler<'p> {
             methods,
             interfaces,
             named_types,
+            tags,
             native_exports,
             exports,
             imports,
@@ -191,6 +201,7 @@ impl<'p> Compiler<'p> {
             Rc::clone(&self.methods),
             Rc::clone(&self.interfaces),
             Rc::clone(&self.named_types),
+            Rc::clone(&self.tags),
             Rc::clone(&self.native_exports),
             Rc::clone(&self.exports),
             Rc::clone(&self.imports),
@@ -274,12 +285,20 @@ impl<'p> Compiler<'p> {
                     let nil = self.builder.add_constant(ConstValue::Nil);
                     self.builder.emit(Opcode::Const(nil));
                 }
+                // 函数声明携带标签（装饰器）时，记录绑定槽位以便绑定后应用标签。
+                let tag_func = match &d.value {
+                    Some(Expr::Function(f)) if !f.tags.is_empty() => Some(f.clone()),
+                    _ => None,
+                };
                 // 隐式声明（无 `变量` 关键字的 `甲 = 值`）在已有同名变量时是赋值，
                 // 与树遍历求值器一致：依次解析局部槽、闭包 upvalue，命中即原地写入，
                 // 都未命中才声明新局部槽。
                 if !d.is_explicit {
                     if let Some(existing) = self.scope.resolve(&d.name) {
                         self.builder.emit(Opcode::StoreLocal(existing));
+                        if let Some(f) = &tag_func {
+                            self.emit_apply_tags(f, existing)?;
+                        }
                         return Ok(());
                     }
                     if let Some(up) = self.resolve_upvalue(&d.name)? {
@@ -288,10 +307,16 @@ impl<'p> Compiler<'p> {
                     }
                     let slot = self.scope.declare_or_reuse_root(&d.name);
                     self.builder.emit(Opcode::StoreLocal(slot));
+                    if let Some(f) = &tag_func {
+                        self.emit_apply_tags(f, slot)?;
+                    }
                 } else {
                     // 函数提升可能已在根作用域预占同名槽，此处复用而非重新分配。
                     let slot = self.scope.declare_or_reuse_root(&d.name);
                     self.builder.emit(Opcode::StoreLocal(slot));
+                    if let Some(f) = &tag_func {
+                        self.emit_apply_tags(f, slot)?;
+                    }
                 }
                 if matches!(d.visibility, fan_ast::stmt::Visibility::Public) {
                     self.exports.borrow_mut().push(d.name.clone());
@@ -1078,9 +1103,7 @@ impl<'p> Compiler<'p> {
     /// 再像普通变量一样绑定到类名局部槽，使 `X{...}` 与 `X(...)` 能按名取到类。
     fn compile_class(&mut self, c: &fan_ast::stmt::ClassStmt) -> CompileResult<()> {
         self.line(c.pos.line as u32);
-        if !c.tags.is_empty() {
-            return Err("字节码编译器暂不支持标签（装饰器）模型".to_string());
-        }
+        // 模型上的标签与 tree 求值器一样暂不产生任何效果，静默忽略。
         let field_names: Vec<String> = c.fields.iter().map(|f| f.name.clone()).collect();
         let index = self.classes.borrow().len() as u16;
         self.classes.borrow_mut().push(ClassChunk {
@@ -1377,11 +1400,37 @@ impl<'p> Compiler<'p> {
         Ok(())
     }
 
+    /// 把函数声明上的全部标签按书写顺序登记并应用：先把每个标签的参数表达式内联
+    /// 求值到值栈（位置参数至多一个在前、命名参数值在后），再发 `ApplyTag` 作用于
+    /// 绑定槽位。运行时由 VM 构造标签模型实例并回调处理器；未注册标签静默忽略。
+    fn emit_apply_tags(&mut self, f: &fan_ast::expr::FunctionLit, slot: u16) -> CompileResult<()> {
+        for tag in &f.tags {
+            if tag.positional.len() > 1 {
+                return Err("标签未命名参数最多一个".to_string());
+            }
+            let mut argc: u8 = 0;
+            if let Some(first) = tag.positional.first() {
+                self.compile_expr(first)?;
+                argc += 1;
+            }
+            for arg in &tag.named {
+                self.compile_expr(&arg.value)?;
+                argc += 1;
+            }
+            let tag_chunk = TagChunk {
+                name: tag.type_name.clone(),
+                named_names: tag.named.iter().map(|a| a.name.clone()).collect(),
+                has_positional: !tag.positional.is_empty(),
+            };
+            let index = self.tags.borrow().len() as u16;
+            self.tags.borrow_mut().push(tag_chunk);
+            self.builder.emit(Opcode::ApplyTag(index, slot, argc));
+        }
+        Ok(())
+    }
+
     fn compile_function_literal(&mut self, f: &fan_ast::expr::FunctionLit) -> CompileResult<()> {
         self.line(f.pos.line as u32);
-        if !f.tags.is_empty() {
-            return Err("字节码编译器暂不支持标签（装饰器）函数".to_string());
-        }
         // `定义 本地("spec") 函数 名(...)`：不生成字节码函数体，把凡语函数名登记为
         // Runtime 原生 spec 的别名；调用该名时改发 CallNative。与树遍历求值器的
         // bind_native 对齐：带模块前缀优先按完整 spec，否则按点号后的短名。

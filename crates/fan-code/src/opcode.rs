@@ -133,6 +133,11 @@ pub enum Opcode {
     /// 命名类型构造：弹出底层值，按 `[u16]` 字符串常量给出的类型名包装为命名类型值；
     /// 底层类型不满足该命名类型的底层成员时报错（对齐 tree 的 convert_to_named）。
     NewNamed(u16) = 52,
+    /// 对刚绑定到局部槽 `[u16]` 的函数应用一个标签：标签元数据取模块 `tags` 表 `[u16]`，
+    /// 参数值个数 `[u8]`（已在值栈上，顺序为位置参数至多一个 + 命名参数值）。
+    /// 运行时弹出参数构造标签模型实例、查找已注册的凡语言处理器并回调，处理器可经标签
+    /// 上下文替换实现；命中替换时把新可调用值写回该局部槽，未注册标签则静默忽略。
+    ApplyTag(u16, u16, u8) = 53,
 }
 
 /// [`Opcode::ForStep`] 的可迭代对象类型标签。
@@ -202,6 +207,7 @@ impl Opcode {
                 let _ = argc;
                 3
             }
+            Opcode::ApplyTag(..) => 5,
         }
     }
 
@@ -265,6 +271,7 @@ impl Opcode {
             50 => Some(Opcode::TypeTest(0)),
             51 => Some(Opcode::TypeCast(0)),
             52 => Some(Opcode::NewNamed(0)),
+            53 => Some(Opcode::ApplyTag(0, 0, 0)),
             _ => None,
         }
     }

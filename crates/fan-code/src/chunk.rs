@@ -9,7 +9,7 @@ use crate::opcode::Opcode;
 /// 魔数：凡语言编译产物（`.fanc` / `.凡码`）的文件头标识。
 pub const MAGIC: [u8; 4] = *b"FANC";
 /// 字节码格式版本。破坏性变更时 +1，旧产物将被拒绝并回退源码重编译。
-pub const BYTECODE_VERSION: u16 = 5;
+pub const BYTECODE_VERSION: u16 = 6;
 /// 项目清单文件名，用于上溯定位项目根（与 fan-mod 的约定保持一致）。
 pub const MANIFEST_MARKER: &str = "fan.toml";
 
@@ -89,6 +89,10 @@ pub struct ModuleChunk {
     pub interfaces: Vec<InterfaceChunk>,
     /// 模块内声明的自定义命名类型，VM 链接模块时注册到 Runtime 并支持类型名构造调用。
     pub named_types: Vec<NamedTypeChunk>,
+    /// 模块内函数声明上出现的标签（装饰器），`ApplyTag` 以索引引用。
+    /// 仅承载可序列化的纯数据：标签名、至多一个位置参数表达式、命名参数表达式，
+    /// 表达式在所属入口块的常量/指令中以独立小代码块编译，运行时求值后构造标签实例。
+    pub tags: Vec<TagChunk>,
     /// 公开导出的原生别名：(凡语函数名, Runtime 原生 spec 名)。
     /// `定义 公开 本地(...)` 的别名不占运行期槽值，加载器据此导出真实 Builtin。
     pub native_exports: Vec<(String, String)>,
@@ -163,6 +167,22 @@ pub struct NamedTypeChunk {
     pub is_union: bool,
 }
 
+/// 标签（装饰器）编译产物：纯元数据，参数表达式不内嵌于此。
+///
+/// 参数表达式在函数绑定的同一代码块中先于 `ApplyTag` 内联编译求值，由
+/// `ApplyTag` 指令按 `has_positional` 与 `named_names` 从值栈收集：位置参数至多
+/// 一个（写入标签实例字段 `值`），其余按 `named_names` 同名写入。运行时据此构造
+/// 标签模型实例并回调已注册的凡语言处理器；未注册标签静默忽略。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TagChunk {
+    /// 标签名（`@名字` 中的名字）。
+    pub name: String,
+    /// 命名参数的字段名，顺序与栈上排在位置参数之后的各值对齐。
+    pub named_names: Vec<String>,
+    /// 是否带一个位置参数（其值位于收集序列最前，写入字段 `值`）。
+    pub has_positional: bool,
+}
+
 impl Chunk {
     pub fn new() -> Self {
         Chunk::default()
@@ -226,6 +246,11 @@ impl ChunkBuilder {
             | Opcode::InvokeMethod(idx, argc)
             | Opcode::NewInstance(idx, argc) => {
                 self.chunk.code.extend_from_slice(&idx.to_le_bytes());
+                self.chunk.code.push(*argc);
+            }
+            Opcode::ApplyTag(tag_idx, slot, argc) => {
+                self.chunk.code.extend_from_slice(&tag_idx.to_le_bytes());
+                self.chunk.code.extend_from_slice(&slot.to_le_bytes());
                 self.chunk.code.push(*argc);
             }
             Opcode::Halt
