@@ -82,6 +82,7 @@ fn decode_instruction(code: &[u8], start: usize) -> Result<(Opcode, usize), Stri
         Opcode::TypeCast(_) => Opcode::TypeCast(u16_at(0)),
         Opcode::NewNamed(_) => Opcode::NewNamed(u16_at(0)),
         Opcode::ApplyTag(..) => Opcode::ApplyTag(u16_at(0), u16_at(2), operand[4]),
+        Opcode::ImportNames(..) => Opcode::ImportNames(u16_at(0), u16_at(2)),
     };
     Ok((op, 1 + operand_size))
 }
@@ -159,6 +160,9 @@ fn render(op: &Opcode, chunk: &Chunk) -> String {
         Opcode::NewNamed(i) => format!("NEW_NAMED name_const={i}"),
         Opcode::ApplyTag(t, slot, argc) => {
             format!("APPLY_TAG tag[{t}] slot={slot} argc={argc}")
+        }
+        Opcode::ImportNames(path, alias) => {
+            format!("IMPORT_NAMES path={} alias={}", const_str(*path), const_str(*alias))
         }
         other => format!("{other:?}"),
     }

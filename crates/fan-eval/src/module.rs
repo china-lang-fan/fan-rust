@@ -310,12 +310,17 @@ impl Interpreter {
             .borrow_mut()
             .declare(
                 &stmt.name,
-                Object::Module(module),
+                Object::Module(module.clone()),
                 true,
                 fan_ast::DeclType::any(),
                 Visibility::File,
             )
             .map_err(|e| FanError::at(e, stmt.pos))?;
+        // 把模块公开成员登记到裸名回退层：局部/upvalue 未命中时可直接用成员名，
+        // 多模块同名进入歧义状态，裸用时由 eval_ident 报错并提示限定访问。
+        self.env
+            .borrow()
+            .add_imported_members(&stmt.name, &module.borrow());
         value(Object::Nil)
     }
 
@@ -631,5 +636,56 @@ mod tests {
         assert!(run_with_base(&base, "导入 \"坏模块\" 作为 坏")
             .unwrap_err()
             .contains("解析失败"));
+    }
+
+    #[test]
+    fn 导入成员可裸名访问也可限定访问() {
+        let dir = temp_dir("bare");
+        write_module(
+            &dir,
+            "数学",
+            "公开 函数 加倍(整数 数) -> 整数\n    返回 数 乘 2\n结束\n",
+        );
+        let base = dir.to_string_lossy().to_string();
+        check(
+            &base,
+            "导入 \"数学\" 作为 数学模块\n[加倍(21), 数学模块.加倍(3)]",
+            "[42, 6]",
+        );
+    }
+
+    #[test]
+    fn 局部定义遮蔽导入成员() {
+        let dir = temp_dir("shadow");
+        write_module(
+            &dir,
+            "数学",
+            "公开 函数 加倍(整数 数) -> 整数\n    返回 数 乘 2\n结束\n",
+        );
+        let base = dir.to_string_lossy().to_string();
+        let src = "导入 \"数学\" 作为 数学模块\n\
+                   函数 加倍(整数 数) -> 整数\n    返回 数 加 1\n结束\n\
+                   [加倍(10), 数学模块.加倍(10)]";
+        check(&base, src, "[11, 20]");
+    }
+
+    #[test]
+    fn 多模块同名裸名歧义报错但限定可用() {
+        let dir = temp_dir("ambiguous");
+        write_module(&dir, "甲", "公开 函数 共同() -> 整数\n    返回 1\n结束\n");
+        write_module(&dir, "乙", "公开 函数 共同() -> 整数\n    返回 2\n结束\n");
+        let base = dir.to_string_lossy().to_string();
+        let err = run_with_base(
+            &base,
+            "导入 \"甲\" 作为 甲模块\n导入 \"乙\" 作为 乙模块\n共同()",
+        )
+        .unwrap_err();
+        assert!(err.contains("冲突"), "实际：{err}");
+        // 限定访问不受歧义影响。
+        check(
+            &base,
+            "导入 \"甲\" 作为 甲模块\n导入 \"乙\" 作为 乙模块\n[甲模块.共同(), 乙模块.共同()]",
+            "[1, 2]",
+        );
     }
 }

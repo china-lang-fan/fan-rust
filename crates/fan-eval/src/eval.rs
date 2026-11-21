@@ -1019,6 +1019,22 @@ impl Interpreter {
         if let Some(v) = env.borrow().get(name) {
             return value(v);
         }
+        // 导入模块成员的裸名回退层：局部/upvalue 未命中时查已导入模块的公开成员。
+        // 多模块同名歧义时报错，提示用 模块.成员 限定（限定访问与 通过 不受影响）。
+        if let Some(imported) = env.borrow().get_imported(name) {
+            return match imported {
+                Ok(v) => value(v),
+                Err(sources) => Err(FanError::at(
+                    format!(
+                        "名字 {} 在模块 [{}] 中冲突，请用 模块名.{} 限定访问",
+                        name,
+                        sources.join("、"),
+                        name
+                    ),
+                    pos,
+                )),
+            };
+        }
         // 未声明时回退到原生函数表，使 `打印` 等内建可直接按名字使用。
         let native = env.borrow().runtime().borrow().lookup_native(name);
         if let Some(b) = native {

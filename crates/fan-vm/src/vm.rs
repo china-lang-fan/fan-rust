@@ -29,6 +29,24 @@ const THROW_SENTINEL: &str = "__vm_throw__";
 /// 跨 VM 共享的模块表：模块 ID → 模块块（持有所有权）。
 pub type SharedModules = Rc<RefCell<HashMap<ModuleId, Rc<ModuleChunk>>>>;
 
+/// 已导入模块成员在当前 VM 的裸名回退绑定。
+///
+/// 多模块导出同名成员时来源累积到 ≥2 即歧义：裸用报错并提示限定访问，
+/// 但 `模块.成员` 与 `通过` 仍可用。
+#[derive(Debug, Clone)]
+struct ImportedEntry {
+    /// 唯一来源时的值；歧义时保留首个值备查（不直接用于解析）。
+    value: Object,
+    /// 提供该名字的模块别名列表。
+    sources: Vec<String>,
+}
+
+impl ImportedEntry {
+    fn is_ambiguous(&self) -> bool {
+        self.sources.len() >= 2
+    }
+}
+
 /// 单线程栈式虚拟机。
 pub struct Vm<'m> {
     /// 已链接的模块表，主模块固定为 [`MAIN_MODULE`]；主/子 VM 与加载器共享。
@@ -55,6 +73,9 @@ pub struct Vm<'m> {
     /// 自定义命名类型扩展方法表：(命名类型名, 方法名) → (所属模块, 函数表索引)。
     /// 命名类型方法在成员访问时优先于底层基本类型的同名方法（对齐 tree 查找顺序）。
     named_method_registry: HashMap<(String, String), (ModuleId, u16)>,
+    /// 已导入模块公开成员的裸名回退表：裸成员名 → 条目（唯一值或多模块歧义）。
+    /// 局部/upvalue/全局均未命中时才查这里；按 VM 实例隔离，不跨模块泄漏。
+    imported: HashMap<String, ImportedEntry>,
     /// 模块加载器；遇到 LoadModule 时按路径解析。未注入则导入语句报错。
     loader: Option<Box<dyn ModuleLoader>>,
     /// 当前沿调用栈传播的崩溃值（`崩溃了` 抛出的规范错误对象）。
@@ -83,6 +104,7 @@ impl<'m> Vm<'m> {
             method_registry: HashMap::new(),
             primitive_method_registry: HashMap::new(),
             named_method_registry: HashMap::new(),
+            imported: HashMap::new(),
             loader: None,
             pending_throw: None,
             _marker: std::marker::PhantomData,
@@ -388,7 +410,18 @@ impl<'m> Vm<'m> {
                     let name = self.string_const(&chunk, idx)?;
                     if let Some(value) = self.globals.get(&name).cloned() {
                         self.stack.push(value);
-                    } else if let Some(builtin) = self.runtime.borrow().lookup_native(&name) {
+                    } else if let Some(entry) = self.imported.get(&name) {
+                        // 导入模块成员回退层：歧义裸用时报错，提示限定访问。
+                        if entry.is_ambiguous() {
+                            return Err(VmError::new(format!(
+                                "名字 {} 在模块 [{}] 中冲突，请用 模块名.{} 限定访问",
+                                name,
+                                entry.sources.join("、"),
+                                name
+                            )));
+                        }
+                        self.stack.push(entry.value.clone());
+                    } else if let Some(builtin) = self.resolve_native(&name) {
                         self.stack.push(Object::Builtin(builtin));
                     } else {
                         return Err(VmError::new(format!("未定义的名字：{name}")));
@@ -771,6 +804,22 @@ impl<'m> Vm<'m> {
                     };
                     self.stack.push(module);
                 }
+                Opcode::ImportNames(..) => {
+                    let path_idx = self.read_u16(&chunk)? as usize;
+                    let alias_idx = self.read_u16(&chunk)? as usize;
+                    let path = self.string_const(&chunk, path_idx)?;
+                    let alias = self.string_const(&chunk, alias_idx)?;
+                    let module = match self.loader.as_mut() {
+                        Some(loader) => loader.load(&path)?,
+                        None => {
+                            return Err(VmError::new(format!("未注入模块加载器，无法导入 {path}")))
+                        }
+                    };
+                    if let Object::Module(m) = &module {
+                        self.register_imported(&alias, &m.borrow());
+                    }
+                    self.stack.push(module);
+                }
                 Opcode::GetMember(_) => {
                     let idx = self.read_u16(&chunk)? as usize;
                     let name = self.string_const(&chunk, idx)?;
@@ -995,6 +1044,28 @@ impl<'m> Vm<'m> {
                 "标签处理器不可调用：{}",
                 other.kind()
             ))),
+        }
+    }
+
+    /// 把一个已导入模块的全部公开成员登记到裸名回退表。
+    ///
+    /// 同一裸名首次登记为唯一来源；再次由别的模块登记则累积来源进入歧义状态。
+    /// 同一模块重复导入（加载器缓存命中）按别名去重，不误报歧义。
+    fn register_imported(&mut self, alias: &str, module: &fan_object::ModuleValue) {
+        for (name, value) in &module.exports {
+            let entry = self
+                .imported
+                .entry(name.clone())
+                .or_insert_with(|| ImportedEntry {
+                    value: value.clone(),
+                    sources: Vec::new(),
+                });
+            if !entry.sources.iter().any(|s| s == alias) {
+                entry.sources.push(alias.to_string());
+            }
+            if entry.sources.len() == 1 {
+                entry.value = value.clone();
+            }
         }
     }
 

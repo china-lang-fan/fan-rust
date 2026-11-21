@@ -446,7 +446,9 @@ impl<'p> Compiler<'p> {
                     self.imports.borrow_mut().push(import.path.clone());
                 }
                 let path_idx = self.add_string_const(&import.path);
-                self.builder.emit(Opcode::LoadModule(path_idx));
+                let alias_idx = self.add_string_const(&import.name);
+                // 加载模块对象压栈，并由 VM 登记其公开成员的裸名回退绑定。
+                self.builder.emit(Opcode::ImportNames(path_idx, alias_idx));
                 // 模块对象绑定到别名（默认名取路径末段），作为当前作用域局部。
                 let slot = self.scope.declare(&import.name);
                 self.builder.emit(Opcode::StoreLocal(slot));

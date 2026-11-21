@@ -9,7 +9,7 @@ use crate::opcode::Opcode;
 /// 魔数：凡语言编译产物（`.fanc` / `.凡码`）的文件头标识。
 pub const MAGIC: [u8; 4] = *b"FANC";
 /// 字节码格式版本。破坏性变更时 +1，旧产物将被拒绝并回退源码重编译。
-pub const BYTECODE_VERSION: u16 = 6;
+pub const BYTECODE_VERSION: u16 = 7;
 /// 项目清单文件名，用于上溯定位项目根（与 fan-mod 的约定保持一致）。
 pub const MANIFEST_MARKER: &str = "fan.toml";
 
@@ -252,6 +252,10 @@ impl ChunkBuilder {
                 self.chunk.code.extend_from_slice(&tag_idx.to_le_bytes());
                 self.chunk.code.extend_from_slice(&slot.to_le_bytes());
                 self.chunk.code.push(*argc);
+            }
+            Opcode::ImportNames(path_idx, alias_idx) => {
+                self.chunk.code.extend_from_slice(&path_idx.to_le_bytes());
+                self.chunk.code.extend_from_slice(&alias_idx.to_le_bytes());
             }
             Opcode::Halt
             | Opcode::Pop

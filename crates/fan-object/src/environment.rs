@@ -10,6 +10,26 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// 导入模块成员在当前模块的裸名回退绑定。
+///
+/// 模块经 `导入` 后，其公开成员作为最外层回退作用域：局部/upvalue 未命中时才查这里。
+/// 多个模块导出同名成员时进入歧义状态，裸用报错并提示用 `模块.成员` 限定；
+/// 限定访问与 `通过` 不受影响。
+#[derive(Debug, Clone)]
+pub struct ImportedEntry {
+    /// 唯一来源时的值；歧义状态下保留首个值（不直接使用，仅备查）。
+    pub value: Object,
+    /// 提供该名字的模块名列表；长度 ≥ 2 即歧义。
+    pub sources: Vec<String>,
+}
+
+impl ImportedEntry {
+    /// 是否处于多模块同名歧义状态。
+    pub fn is_ambiguous(&self) -> bool {
+        self.sources.len() >= 2
+    }
+}
+
 /// 环境中的一个绑定。
 #[derive(Debug, Clone)]
 pub struct Binding {
@@ -33,6 +53,9 @@ pub struct Environment {
     pub module_name: String,
     /// 是否处于模块导出模式：为 true 时声明会记录可见性以供导出。
     pub module_export: bool,
+    /// 导入模块成员的裸名回退表，模块内所有内嵌作用域共享同一份。
+    /// 局部/upvalue 未命中时才查这里；多模块同名进入歧义状态。
+    imported: Rc<RefCell<HashMap<String, ImportedEntry>>>,
 }
 
 impl Environment {
@@ -51,18 +74,20 @@ impl Environment {
             source_file: String::new(),
             module_name: String::new(),
             module_export: false,
+            imported: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
     /// 创建内嵌于 `outer` 的新作用域。
     pub fn enclosed(outer: Rc<RefCell<Environment>>) -> Self {
-        let (rt, base_dir, source_file, module_name) = {
+        let (rt, base_dir, source_file, module_name, imported) = {
             let o = outer.borrow();
             (
                 o.rt.clone(),
                 o.base_dir.clone(),
                 o.source_file.clone(),
                 o.module_name.clone(),
+                Rc::clone(&o.imported),
             )
         };
         Environment {
@@ -73,6 +98,7 @@ impl Environment {
             source_file,
             module_name,
             module_export: false,
+            imported,
         }
     }
 
@@ -241,6 +267,41 @@ impl Environment {
     /// 判断名字是否绑定到模块对象。
     pub fn is_module_name(&self, name: &str) -> bool {
         matches!(self.get(name), Some(Object::Module(_)))
+    }
+
+    /// 把一个已导入模块的全部公开成员登记到裸名回退层。
+    ///
+    /// 同一裸名首次登记为唯一来源；再次由别的模块登记则进入歧义状态并累积来源模块名。
+    /// 同一模块重复导入（缓存命中）时来源去重，不误报歧义。
+    pub fn add_imported_members(&self, module_name: &str, module: &crate::ModuleValue) {
+        let mut imported = self.imported.borrow_mut();
+        for (name, value) in &module.exports {
+            let entry = imported
+                .entry(name.clone())
+                .or_insert_with(|| ImportedEntry {
+                    value: value.clone(),
+                    sources: Vec::new(),
+                });
+            if !entry.sources.iter().any(|s| s == module_name) {
+                entry.sources.push(module_name.to_string());
+            }
+            // 多来源时不再有唯一值，但保留首个值备查。
+            if entry.sources.len() == 1 {
+                entry.value = value.clone();
+            }
+        }
+    }
+
+    /// 查询导入回退层：返回 `Ok(值)` 表示唯一来源，`Err(来源模块列表)` 表示歧义，
+    /// `None` 表示没有任何模块导出该名字。
+    pub fn get_imported(&self, name: &str) -> Option<Result<Object, Vec<String>>> {
+        let imported = self.imported.borrow();
+        let entry = imported.get(name)?;
+        if entry.is_ambiguous() {
+            Some(Err(entry.sources.clone()))
+        } else {
+            Some(Ok(entry.value.clone()))
+        }
     }
 }
 
@@ -921,5 +982,62 @@ mod tests {
         assert!(class_of(&inst).is_some());
         assert_eq!(class_of(&inst).unwrap().name, "矩形");
         assert!(class_of(&Object::int(1)).is_none());
+    }
+
+    #[test]
+    fn 导入成员唯一来源可裸名查询() {
+        let e = env();
+        let mut module = crate::ModuleValue::new("数学");
+        module.set("加倍", Object::int(42));
+        e.add_imported_members("数学模块", &module);
+        assert_eq!(e.get_imported("加倍"), Some(Ok(Object::int(42))));
+        assert_eq!(e.get_imported("不存在"), None);
+    }
+
+    #[test]
+    fn 多模块同名进入歧义并保留来源() {
+        let e = env();
+        let mut 甲 = crate::ModuleValue::new("甲");
+        甲.set("共同", Object::int(1));
+        let mut 乙 = crate::ModuleValue::new("乙");
+        乙.set("共同", Object::int(2));
+        e.add_imported_members("甲模块", &甲);
+        e.add_imported_members("乙模块", &乙);
+        match e.get_imported("共同") {
+            Some(Err(sources)) => {
+                assert_eq!(sources, vec!["甲模块".to_string(), "乙模块".to_string()])
+            }
+            other => panic!("应为歧义，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 同一模块重复导入不误报歧义() {
+        let e = env();
+        let mut module = crate::ModuleValue::new("数学");
+        module.set("加倍", Object::int(42));
+        e.add_imported_members("数学模块", &module);
+        e.add_imported_members("数学模块", &module);
+        assert_eq!(e.get_imported("加倍"), Some(Ok(Object::int(42))));
+    }
+
+    #[test]
+    fn 局部绑定遮蔽导入回退层() {
+        let mut e = env();
+        let mut module = crate::ModuleValue::new("数学");
+        module.set("加倍", Object::int(42));
+        e.add_imported_members("数学模块", &module);
+        e.declare(
+            "加倍",
+            Object::int(7),
+            false,
+            DeclType::any(),
+            Visibility::File,
+        )
+        .unwrap();
+        // 局部优先于导入回退层。
+        assert_eq!(e.get("加倍"), Some(Object::int(7)));
+        // 回退层仍保留模块来源。
+        assert_eq!(e.get_imported("加倍"), Some(Ok(Object::int(42))));
     }
 }

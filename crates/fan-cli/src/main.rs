@@ -719,9 +719,7 @@ mod tests {
     #[test]
     fn vm未注册标签静默忽略并与tree一致() {
         // 未注册标签静默忽略，被标注函数照常执行，双引擎结果一致。
-        assert_engines_agree(
-            "@自定义标记\n定义 函数 被测()\n 返回 7\n结束\n打印行(被测())\n",
-        );
+        assert_engines_agree("@自定义标记\n定义 函数 被测()\n 返回 7\n结束\n打印行(被测())\n");
     }
 
     /// 文件级双引擎对拍：在临时目录运行主模块（可含导入），用内存输出 sink
@@ -748,6 +746,35 @@ mod tests {
         }
         let captured = String::from_utf8(sink.borrow().get_ref().clone()).unwrap();
         std::fs::write(out_file, captured).unwrap();
+    }
+
+    /// 文件级运行引擎并返回错误字符串（用于对拍两引擎的报错行为）。
+    fn run_file_engine_err(path: &str, engine: Engine) -> String {
+        let source = std::fs::read_to_string(path).unwrap();
+        let (program, errors) = parse_program(&source);
+        assert!(errors.is_empty(), "解析错误：{:?}", errors.0);
+        let sink: Rc<RefCell<std::io::Cursor<Vec<u8>>>> =
+            Rc::new(RefCell::new(std::io::Cursor::new(Vec::new())));
+        let rt = Rc::new(RefCell::new(Runtime::with_output(sink.clone())));
+        let abs = abs_path(path);
+        let dir = Path::new(&abs)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        match engine {
+            Engine::Tree => {
+                let mut interp =
+                    Interpreter::for_script(rt, default_modules_dirs(&dir), &dir, &abs);
+                interp
+                    .run(&program)
+                    .map(|_| String::new())
+                    .unwrap_err()
+                    .display()
+            }
+            Engine::Vm => run_vm(&program, rt, &dir)
+                .map(|_| String::new())
+                .unwrap_err(),
+        }
     }
 
     #[test]
@@ -812,6 +839,99 @@ mod tests {
             std::fs::read_to_string(&vm_out).unwrap(),
             "嵌套导入双引擎输出不一致"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 双引擎对拍导入成员裸名访问与限定并存() {
+        let dir = temp_dir("import-bare");
+        let lib = dir.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        write(
+            &lib,
+            "运算.凡",
+            "公开 变量 版本 = \"1.0\"\n\
+             公开 函数 加倍(整数 n) -> 整数\n  返回 n 乘 2\n结束\n\
+             公开 定义 模型 圆\n  公开 属性 整数 半径\n结束\n",
+        );
+        let main_path = write(
+            &dir,
+            "主.凡",
+            "导入 \"lib/运算\" 作为 运算模块\n\
+             打印行(加倍(21))\n\
+             打印行(版本)\n\
+             变量 c = 圆{半径: 3}\n打印行(c.半径)\n\
+             打印行(运算模块.加倍(5))\n",
+        );
+        let tree_out = dir.join("tree.txt").to_string_lossy().to_string();
+        let vm_out = dir.join("vm.txt").to_string_lossy().to_string();
+        run_file_engine_captured(&main_path, Engine::Tree, &tree_out);
+        run_file_engine_captured(&main_path, Engine::Vm, &vm_out);
+        assert_eq!(
+            std::fs::read_to_string(&tree_out).unwrap(),
+            std::fs::read_to_string(&vm_out).unwrap(),
+            "裸名导入双引擎输出不一致"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 双引擎对拍局部定义遮蔽导入成员() {
+        let dir = temp_dir("import-shadow");
+        let lib = dir.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        write(
+            &lib,
+            "运算.凡",
+            "公开 函数 加倍(整数 n) -> 整数\n  返回 n 乘 2\n结束\n",
+        );
+        let main_path = write(
+            &dir,
+            "主.凡",
+            "导入 \"lib/运算\" 作为 运算模块\n\
+             函数 加倍(整数 n) -> 整数\n  返回 n 加 1\n结束\n\
+             打印行(加倍(10))\n打印行(运算模块.加倍(10))\n",
+        );
+        let tree_out = dir.join("tree.txt").to_string_lossy().to_string();
+        let vm_out = dir.join("vm.txt").to_string_lossy().to_string();
+        run_file_engine_captured(&main_path, Engine::Tree, &tree_out);
+        run_file_engine_captured(&main_path, Engine::Vm, &vm_out);
+        assert_eq!(
+            std::fs::read_to_string(&tree_out).unwrap(),
+            std::fs::read_to_string(&vm_out).unwrap(),
+            "遮蔽导入成员双引擎输出不一致"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 双引擎对拍多模块同名裸名歧义报错且限定可用() {
+        let dir = temp_dir("import-ambiguous");
+        let lib_a = dir.join("a");
+        let lib_b = dir.join("b");
+        std::fs::create_dir_all(&lib_a).unwrap();
+        std::fs::create_dir_all(&lib_b).unwrap();
+        write(
+            &lib_a,
+            "甲.凡",
+            "公开 函数 共同() -> 整数\n  返回 1\n结束\n",
+        );
+        write(
+            &lib_b,
+            "乙.凡",
+            "公开 函数 共同() -> 整数\n  返回 2\n结束\n",
+        );
+        let main_path = write(
+            &dir,
+            "主.凡",
+            "导入 \"a/甲\" 作为 甲模块\n导入 \"b/乙\" 作为 乙模块\n\
+             打印行(甲模块.共同())\n打印行(乙模块.共同())\n\
+             打印行(共同())\n",
+        );
+        let tree = run_file_engine_err(&main_path, Engine::Tree);
+        let vm = run_file_engine_err(&main_path, Engine::Vm);
+        assert!(tree.contains("冲突"), "tree 实际：{tree}");
+        assert!(vm.contains("冲突"), "vm 实际：{vm}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

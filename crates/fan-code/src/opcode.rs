@@ -138,6 +138,10 @@ pub enum Opcode {
     /// 运行时弹出参数构造标签模型实例、查找已注册的凡语言处理器并回调，处理器可经标签
     /// 上下文替换实现；命中替换时把新可调用值写回该局部槽，未注册标签则静默忽略。
     ApplyTag(u16, u16, u8) = 53,
+    /// 导入模块并登记其公开成员的裸名回退绑定：模块路径取常量池 `[u16]`，别名取常量池 `[u16]`。
+    /// 运行时加载模块对象压栈（随后由 StoreLocal 绑定别名槽），并把模块导出逐名登记到
+    /// VM 的 imported 回退表，多模块同名进入歧义状态，裸用时报错提示限定访问。
+    ImportNames(u16, u16) = 54,
 }
 
 /// [`Opcode::ForStep`] 的可迭代对象类型标签。
@@ -195,7 +199,6 @@ impl Opcode {
             | Opcode::TypeTest(_)
             | Opcode::TypeCast(_)
             | Opcode::NewNamed(_) => 2,
-
             Opcode::Jump(_) | Opcode::JumpIfFalse(_) | Opcode::JumpIfTrue(_) => 4,
 
             Opcode::Call(_) => 1,
@@ -208,6 +211,7 @@ impl Opcode {
                 3
             }
             Opcode::ApplyTag(..) => 5,
+            Opcode::ImportNames(..) => 4,
         }
     }
 
@@ -272,6 +276,7 @@ impl Opcode {
             51 => Some(Opcode::TypeCast(0)),
             52 => Some(Opcode::NewNamed(0)),
             53 => Some(Opcode::ApplyTag(0, 0, 0)),
+            54 => Some(Opcode::ImportNames(0, 0)),
             _ => None,
         }
     }
