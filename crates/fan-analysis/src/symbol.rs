@@ -3,8 +3,9 @@
 use fan_ast::Position;
 
 /// 符号种类，与 Go 版 `analysis.SymbolKind` 对应。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SymbolKind {
+    #[default]
     Function,
     MixfixFunction,
     Class,

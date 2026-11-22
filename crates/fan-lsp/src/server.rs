@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 
+use fan_analysis::pinyin::{DoublePinyinScheme, InputSchemes, PinyinOptions};
 use fan_analysis::symbol::SymbolKind;
 use fan_analysis::utf16::utf16_column;
 use fan_analysis::{analyze_index, Diagnostic, Index, Severity};
@@ -48,6 +49,8 @@ pub struct Server {
     schedule_tx: Sender<Debounce>,
     schedule_rx: Option<Receiver<Debounce>>,
     debouncer: Option<thread::JoinHandle<()>>,
+    /// 拼音/双拼补全配置，由 initialize 的 initializationOptions 注入。
+    pinyin: Arc<Mutex<PinyinOptions>>,
 }
 
 impl Server {
@@ -61,6 +64,7 @@ impl Server {
             schedule_tx,
             schedule_rx: Some(schedule_rx),
             debouncer: None,
+            pinyin: Arc::new(Mutex::new(PinyinOptions::sensible_default())),
         }
     }
 
@@ -270,7 +274,7 @@ impl Server {
         let params = raw.get("params").cloned().unwrap_or(Value::Null);
 
         match method {
-            "initialize" => self.respond_initialize(id),
+            "initialize" => self.on_initialize(id, params),
             "initialized" | "$/setTrace" | "$/cancelRequest" => {}
             "shutdown" => {
                 let _ = self.respond(id, Value::Null);
@@ -311,17 +315,70 @@ impl Server {
         })
     }
 
-    fn respond_initialize(&self, id: Option<Value>) {
+    fn on_initialize(&self, id: Option<Value>, params: Value) {
+        self.configure_pinyin(&params);
         let result = json!({
             "capabilities": {
                 "textDocumentSync": { "openClose": true, "change": 1 },
                 "definitionProvider": true,
                 "hoverProvider": true,
-                "completionProvider": { "triggerCharacters": [".", "的"] },
+                "completionProvider": {
+                    "triggerCharacters": [".", "的"],
+                    // 拉丁字母作为隐式触发：客户端输入拼音时持续请求补全。
+                    "allCommitCharacters": []
+                },
             },
             "serverInfo": { "name": crate::SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
         });
         let _ = self.respond(id, result);
+    }
+
+    /// 从 `initializationOptions.pinyin` 读取拼音补全配置，缺省字段回退默认值。
+    ///
+    /// 兼容两种摆放：`initializationOptions.pinyin.*`（推荐）与扁平的
+    /// `initializationOptions.*`，字段名同时接受驼峰（maxSuggest）与下划线（max_suggest）。
+    fn configure_pinyin(&self, params: &Value) {
+        let root = params
+            .get("initializationOptions")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let pinyin_node = root.get("pinyin").cloned().unwrap_or(Value::Null);
+        let lookup = |key: &str, flat_key: &str| -> Option<&Value> {
+            pinyin_node.get(key).or_else(|| root.get(flat_key))
+        };
+
+        let mut options = PinyinOptions::sensible_default();
+        if let Some(v) = lookup("enable", "pinyinCompletionEnable") {
+            if let Some(b) = v.as_bool() {
+                options.enabled = b;
+            }
+        }
+        if let Some(v) =
+            lookup("maxSuggest", "max_suggest").or_else(|| lookup("max_suggest", "maxSuggest"))
+        {
+            if let Some(n) = v.as_u64() {
+                options.max_suggest = n as usize;
+            }
+        }
+        if let Some(v) = lookup("doublePinyinScheme", "double_pinyin_scheme") {
+            if let Some(s) = v.as_str() {
+                options.double_scheme = DoublePinyinScheme::parse(s);
+            }
+        }
+        if let Some(schemes) = lookup("schemes", "input_schemes").and_then(Value::as_object) {
+            let mut input = InputSchemes::default();
+            if let Some(b) = schemes.get("full").and_then(Value::as_bool) {
+                input.full = b;
+            }
+            if let Some(b) = schemes.get("initial").and_then(Value::as_bool) {
+                input.initial = b;
+            }
+            if let Some(b) = schemes.get("double").and_then(Value::as_bool) {
+                input.double = b;
+            }
+            options.schemes = input;
+        }
+        *self.pinyin.lock().unwrap() = options;
     }
 
     fn on_did_open(&self, params: &Value) {
@@ -433,9 +490,10 @@ impl Server {
     }
 
     fn on_completion(&self, id: Option<Value>, params: &Value) {
+        let options = self.pinyin.lock().unwrap().clone();
         let result = self.with_position(params, |index, line, character| {
             let items: Vec<Value> = index
-                .completion(line, character)
+                .completion_with_options(line, character, &options)
                 .into_iter()
                 .map(|item| {
                     let kind = if item.detail == "关键字" {
@@ -444,7 +502,7 @@ impl Server {
                         to_completion_kind(item.kind)
                     };
                     let mut obj = Map::new();
-                    obj.insert("label".to_string(), Value::String(item.label));
+                    obj.insert("label".to_string(), Value::String(item.label.clone()));
                     obj.insert("kind".to_string(), Value::from(kind));
                     if !item.detail.is_empty() {
                         obj.insert("detail".to_string(), Value::String(item.detail));
@@ -453,6 +511,19 @@ impl Server {
                         obj.insert(
                             "documentation".to_string(),
                             json!({ "kind": "markdown", "value": item.doc }),
+                        );
+                    }
+                    // 拼音补全：让客户端按拉丁编码过滤，并在接受时整体替换前缀。
+                    if let Some(filter) = item.filter_text {
+                        obj.insert("filterText".to_string(), Value::String(filter));
+                    }
+                    if let Some(range) = item.replace_range {
+                        obj.insert(
+                            "textEdit".to_string(),
+                            json!({
+                                "range": range_to_json(range),
+                                "newText": item.label,
+                            }),
                         );
                     }
                     Value::Object(obj)
@@ -739,6 +810,90 @@ mod tests {
             labels.contains(&"函数".to_string()),
             "应包含关键字：{labels:?}"
         );
+    }
+
+    #[test]
+    fn 拼音补全返回_text_edit_与_filter_text() {
+        // 第 4 行（0-based 3）输入 dzh，应补出 打招呼 并带替换区间。
+        let source = "函数 打招呼(字符串 名字) -> 字符串\n    返回 名字\n结束\ndzh";
+        let mut input = String::new();
+        input.push_str(&frame("initialize", Some(json!(1)), json!({})));
+        input.push_str(&frame(
+            "textDocument/didOpen",
+            None,
+            json!({ "textDocument": { "uri": "file:///p.凡", "languageId": "fan", "version": 1, "text": source } }),
+        ));
+        input.push_str(&frame(
+            "textDocument/completion",
+            Some(json!(4)),
+            json!({ "textDocument": { "uri": "file:///p.凡" }, "position": { "line": 3, "character": 3 } }),
+        ));
+        input.push_str(&frame("exit", None, Value::Null));
+
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        {
+            let mut reader = Cursor::new(input.into_bytes());
+            let mut server = Server::new();
+            server.run(&mut reader, SharedVec(output.clone())).unwrap();
+        }
+        let data = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let frames = read_frames(&data);
+        let comp = frames
+            .iter()
+            .find(|m| m.get("id") == Some(&json!(4)))
+            .expect("未收到 completion 响应");
+        let item = comp
+            .pointer("/result/items")
+            .and_then(Value::as_array)
+            .and_then(|a| a.iter().find(|i| i.get("label") == Some(&json!("打招呼"))))
+            .expect("应包含拼音候选 打招呼");
+        assert!(item.get("filterText").is_some(), "应带 filterText：{item}");
+        let text_edit = item.get("textEdit").expect("应带 textEdit");
+        assert_eq!(text_edit.pointer("/newText"), Some(&json!("打招呼")));
+        assert_eq!(text_edit.pointer("/range/start/character"), Some(&json!(0)));
+        assert_eq!(text_edit.pointer("/range/end/character"), Some(&json!(3)));
+    }
+
+    #[test]
+    fn 初始化选项关闭拼音后不返回_text_edit() {
+        let source = "dzh";
+        let init = json!({
+            "initializationOptions": {
+                "pinyin": { "enable": false }
+            }
+        });
+        let mut input = String::new();
+        input.push_str(&frame("initialize", Some(json!(1)), init));
+        input.push_str(&frame(
+            "textDocument/didOpen",
+            None,
+            json!({ "textDocument": { "uri": "file:///q.凡", "languageId": "fan", "version": 1, "text": source } }),
+        ));
+        input.push_str(&frame(
+            "textDocument/completion",
+            Some(json!(5)),
+            json!({ "textDocument": { "uri": "file:///q.凡" }, "position": { "line": 0, "character": 3 } }),
+        ));
+        input.push_str(&frame("exit", None, Value::Null));
+
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        {
+            let mut reader = Cursor::new(input.into_bytes());
+            let mut server = Server::new();
+            server.run(&mut reader, SharedVec(output.clone())).unwrap();
+        }
+        let data = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let frames = read_frames(&data);
+        let comp = frames
+            .iter()
+            .find(|m| m.get("id") == Some(&json!(5)))
+            .expect("未收到 completion 响应");
+        let has_text_edit = comp
+            .pointer("/result/items")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().any(|i| i.get("textEdit").is_some()))
+            .unwrap_or(false);
+        assert!(!has_text_edit, "关闭拼音后不应出现 textEdit：{comp}");
     }
 
     #[test]

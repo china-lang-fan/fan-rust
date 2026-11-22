@@ -11,3 +11,5 @@ fan-ast = { workspace = true }
 fan-parser = { workspace = true }
 # 仅用于静态读取 core/ext 内建名清单做 native 名诊断，不触发扩展动态库加载。
 fan-native = { workspace = true }
+# 汉字转无声调拼音，供 LSP 拼音/双拼补全计算全拼、首字母与音节拆分。
+pinyin = { workspace = true }

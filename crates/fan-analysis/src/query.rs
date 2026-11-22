@@ -5,6 +5,7 @@
 
 use crate::document::Document;
 use crate::index::Index;
+use crate::pinyin::{codes_of, is_latin_prefix, matches_input, InputSchemes, PinyinOptions};
 use crate::symbol::{Symbol, SymbolKind};
 use crate::utf16::{is_letter, utf16_column, utf16_to_rune_col, word_at, WordMatch};
 
@@ -33,12 +34,16 @@ pub struct HoverResult {
     pub range: Range,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CompletionItem {
     pub label: String,
     pub kind: SymbolKind,
     pub detail: String,
     pub doc: String,
+    /// 客户端过滤文本：拼音补全时填入拉丁编码，避免输入字母时中文 label 被过滤。
+    pub filter_text: Option<String>,
+    /// 接受补全时替换的区间；拼音补全用于整体替换光标前的拉丁前缀。
+    pub replace_range: Option<Range>,
 }
 
 /// 补全列表里的关键字（Go 版 CompletionKeywords 对应物）。
@@ -162,8 +167,21 @@ impl Index {
         None
     }
 
-    /// 补全查询。
+    /// 补全查询（默认关闭拼音选项，保持历史行为）。
     pub fn completion(&self, line0: usize, char16: usize) -> Vec<CompletionItem> {
+        self.completion_with_options(line0, char16, &PinyinOptions::default())
+    }
+
+    /// 带拼音/双拼配置的补全查询。
+    ///
+    /// 成员补全（`.`/`的`）与模型字段补全优先；其余情况下若光标前是拉丁前缀
+    /// 且启用了拼音补全，则在关键字与项目符号上做全拼/首字母/双拼前缀匹配。
+    pub fn completion_with_options(
+        &self,
+        line0: usize,
+        char16: usize,
+        options: &PinyinOptions,
+    ) -> Vec<CompletionItem> {
         let doc = self.root();
         let line = doc.line_text(line0 + 1);
         if let Some(owner_expr) = completion_owner(line, char16) {
@@ -173,7 +191,98 @@ impl Index {
         if let Some(model) = composite_field_completion_model(line, char16) {
             return self.model_field_completions(&model);
         }
+        if options.enabled {
+            if let Some((input, range)) = latin_prefix_at(line, line0, char16) {
+                let pinyin_items = self.pinyin_completions(&input, range, options);
+                if !pinyin_items.is_empty() {
+                    return pinyin_items;
+                }
+            }
+        }
         self.root_completions()
+    }
+
+    /// 在关键字、本文件符号、导入模块符号与外挂词条上做拼音前缀匹配。
+    fn pinyin_completions(
+        &self,
+        input: &str,
+        replace_range: Range,
+        options: &PinyinOptions,
+    ) -> Vec<CompletionItem> {
+        // (label, kind, detail) 去重后的候选池。
+        let mut pool: Vec<(String, SymbolKind, String)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut push = |label: String, kind: SymbolKind, detail: String| {
+            if seen.insert(label.clone()) {
+                pool.push((label, kind, detail));
+            }
+        };
+
+        for kw in COMPLETION_KEYWORDS {
+            push((*kw).to_string(), KEYWORD_KIND, "关键字".to_string());
+        }
+        for sym in &self.root().top_levels {
+            push(sym.name.clone(), sym.kind, sym.detail.clone());
+        }
+        for (name, imp) in &self.root().imports {
+            push(name.clone(), SymbolKind::Module, imp.path.clone());
+            if let Some(full) = self.resolve(&imp.path) {
+                let mod_uri = crate::paths::path_to_uri(&full);
+                if let Some(mod_doc) = self.all_docs().find(|d| d.uri == mod_uri) {
+                    for sym in &mod_doc.top_levels {
+                        push(sym.name.clone(), sym.kind, sym.detail.clone());
+                    }
+                }
+            }
+        }
+        for word in &options.external_words {
+            push(word.clone(), SymbolKind::Variable, "外挂词库".to_string());
+        }
+
+        // 仅含汉字（或汉字为主）的 label 才计算拼音；纯英文 label 交给普通补全。
+        let mut matched: Vec<(CompletionItem, usize)> = Vec::new();
+        for (label, kind, detail) in pool {
+            if !label
+                .chars()
+                .any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c))
+            {
+                continue;
+            }
+            let codes = codes_of(&label, options.double_scheme);
+            if !matches_input(input, &codes, options.schemes) {
+                continue;
+            }
+            let rank = rank_match(input, &codes, options.schemes);
+            let filter_text = format!("{} {} {}", codes.full, codes.initial, codes.double);
+            matched.push((
+                CompletionItem {
+                    label,
+                    kind,
+                    detail,
+                    doc: String::new(),
+                    filter_text: Some(filter_text),
+                    replace_range: Some(replace_range),
+                },
+                rank,
+            ));
+        }
+
+        // 排序：匹配精度（rank 小者优先）→ label 长度 → label 字典序，保证确定性。
+        matched.sort_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| a.0.label.chars().count().cmp(&b.0.label.chars().count()))
+                .then_with(|| a.0.label.cmp(&b.0.label))
+        });
+        let limit = if options.max_suggest == 0 {
+            matched.len()
+        } else {
+            options.max_suggest
+        };
+        matched
+            .into_iter()
+            .take(limit)
+            .map(|(item, _)| item)
+            .collect()
     }
 
     fn lookup_root(&self, name: &str) -> Option<&Symbol> {
@@ -306,6 +415,8 @@ impl Index {
                 kind: sym.kind,
                 detail: sym.detail.clone(),
                 doc: sym.doc.clone(),
+                filter_text: None,
+                replace_range: None,
             });
         }
         for (name, imp) in &self.root().imports {
@@ -314,6 +425,8 @@ impl Index {
                 kind: SymbolKind::Module,
                 detail: imp.path.clone(),
                 doc: String::new(),
+                filter_text: None,
+                replace_range: None,
             });
             if let Some(full) = self.resolve(&imp.path) {
                 let mod_uri = crate::paths::path_to_uri(&full);
@@ -324,6 +437,8 @@ impl Index {
                             kind: sym.kind,
                             detail: sym.detail.clone(),
                             doc: sym.doc.clone(),
+                            filter_text: None,
+                            replace_range: None,
                         });
                     }
                 }
@@ -335,6 +450,8 @@ impl Index {
                 kind: KEYWORD_KIND,
                 detail: "关键字".to_string(),
                 doc: String::new(),
+                filter_text: None,
+                replace_range: None,
             });
         }
         items
@@ -358,6 +475,8 @@ impl Index {
                             kind: sym.kind,
                             detail: sym.detail.clone(),
                             doc: sym.doc.clone(),
+                            filter_text: None,
+                            replace_range: None,
                         });
                     }
                 }
@@ -371,6 +490,8 @@ impl Index {
                     kind: child.kind,
                     detail: child.detail.clone(),
                     doc: child.doc.clone(),
+                    filter_text: None,
+                    replace_range: None,
                 });
             }
             self.add_embedded_members(class, &mut add, &mut std::collections::HashSet::new());
@@ -383,6 +504,8 @@ impl Index {
                     kind: child.kind,
                     detail: child.detail.clone(),
                     doc: child.doc.clone(),
+                    filter_text: None,
+                    replace_range: None,
                 });
             }
         }
@@ -394,6 +517,8 @@ impl Index {
                         kind: sym.kind,
                         detail: sym.detail.clone(),
                         doc: sym.doc.clone(),
+                        filter_text: None,
+                        replace_range: None,
                     });
                 }
             }
@@ -416,6 +541,8 @@ impl Index {
                 kind: SymbolKind::Class,
                 detail: "嵌入".to_string(),
                 doc: String::new(),
+                filter_text: None,
+                replace_range: None,
             });
             if let Some(embed) = self.lookup_class_any_doc(embed_name) {
                 for child in &embed.children {
@@ -424,6 +551,8 @@ impl Index {
                         kind: child.kind,
                         detail: child.detail.clone(),
                         doc: child.doc.clone(),
+                        filter_text: None,
+                        replace_range: None,
                     });
                 }
                 self.add_embedded_members(embed, add, visited);
@@ -446,6 +575,8 @@ impl Index {
                 kind: SymbolKind::Field,
                 detail: child.detail.clone(),
                 doc: String::new(),
+                filter_text: None,
+                replace_range: None,
             });
         }
         for embed in &class.embeds {
@@ -455,6 +586,8 @@ impl Index {
                     kind: SymbolKind::Class,
                     detail: "嵌入".to_string(),
                     doc: String::new(),
+                    filter_text: None,
+                    replace_range: None,
                 });
             }
         }
@@ -547,6 +680,69 @@ fn completion_owner(line: &str, char16: usize) -> Option<String> {
         return None;
     }
     Some(runes[start as usize..=j as usize].iter().collect())
+}
+
+/// 取光标前连续的拉丁字母串及其 LSP 区间（0-based、UTF-16 列）。
+///
+/// 仅当紧邻光标左侧是一段纯 ASCII 字母（至少一个）时返回；遇到中文、数字、
+/// 标点或空白即断开，避免把普通英文标识符之外的内容当作拼音前缀。
+fn latin_prefix_at(line: &str, line0: usize, char16: usize) -> Option<(String, Range)> {
+    let runes: Vec<char> = line.chars().collect();
+    let cursor = utf16_to_rune_col(line, char16);
+    if cursor == 0 || cursor > runes.len() {
+        return None;
+    }
+    let end = cursor;
+    let mut start = end;
+    while start > 0 && runes[start - 1].is_ascii_alphabetic() {
+        start -= 1;
+    }
+    if start == end {
+        return None;
+    }
+    let text: String = runes[start..end].iter().collect();
+    if !is_latin_prefix(&text) {
+        return None;
+    }
+    // rune 列（0-based）转 UTF-16 列：起始 rune 之前的码元数。
+    let start_char: usize = runes[..start].iter().map(|c| c.len_utf16()).sum();
+    let end_char: usize = runes[..end].iter().map(|c| c.len_utf16()).sum();
+    Some((
+        text,
+        Range {
+            start: Position {
+                line: line0,
+                character: start_char,
+            },
+            end: Position {
+                line: line0,
+                character: end_char,
+            },
+        },
+    ))
+}
+
+/// 计算匹配精度排名（越小越优先）：双拼精确 < 双拼前缀 < 全拼精确 <
+/// 全拼前缀 < 首字母精确 < 首字母前缀；未参与的模式排到最后。
+fn rank_match(input: &str, codes: &crate::pinyin::PinyinCodes, schemes: InputSchemes) -> usize {
+    let lower = input.to_ascii_lowercase();
+    let exact = |code: &str| code == lower;
+    let prefix = |code: &str| code.starts_with(&lower);
+    if schemes.double && exact(&codes.double) {
+        0
+    } else if schemes.double && prefix(&codes.double) {
+        1
+    } else if schemes.full && exact(&codes.full) {
+        2
+    } else if schemes.full && prefix(&codes.full) {
+        3
+    } else if schemes.initial && exact(&codes.initial) {
+        4
+    } else if schemes.initial && prefix(&codes.initial) {
+        5
+    } else {
+        6
+    }
 }
 
 /// 判断光标是否位于 `模型{…}` 复合字面量的字段名位置，返回模型名。
@@ -685,5 +881,83 @@ mod tests {
         let model =
             composite_field_completion_model(line, line.chars().count()).expect("应识别模型");
         assert_eq!(model, "矩形");
+    }
+
+    #[test]
+    fn 拼音首字母补全项目符号与关键字() {
+        // 最后一行输入 dzh（打招呼 的首字母），光标在串尾；该行是 0-based 第 4 行。
+        let src = format!("{SRC}dzh");
+        let index = Index::build("file:///t.凡", &src);
+        let line0 = src.lines().count() - 1;
+        let items = index.completion_with_options(line0, 3, &PinyinOptions::sensible_default());
+        let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+        assert!(labels.contains(&"打招呼".to_string()), "实际：{labels:?}");
+        let hit = items
+            .iter()
+            .find(|i| i.label == "打招呼")
+            .expect("应有候选项");
+        assert!(hit.filter_text.is_some());
+        assert!(hit.replace_range.is_some());
+    }
+
+    #[test]
+    fn 拼音全拼补全关键字() {
+        let src = "hanshu";
+        let index = Index::build("file:///t.凡", src);
+        let options = PinyinOptions::sensible_default();
+        let items = index.completion_with_options(0, src.chars().count(), &options);
+        assert!(
+            items.iter().any(|i| i.label == "函数"),
+            "全拼 hanshu 应命中 函数：{:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn 拼音替换区间覆盖整个拉丁前缀() {
+        let line = "变量 x = dzh";
+        let (text, range) = latin_prefix_at(line, 0, line.chars().count()).expect("应取到前缀");
+        assert_eq!(text, "dzh");
+        // “变量 x = ” 共 7 个字符（均 BMP，UTF-16 列等于字符列）。
+        assert_eq!(range.start.character, 7);
+        assert_eq!(range.end.character, 10);
+    }
+
+    #[test]
+    fn 中文行中的拉丁前缀列按_utf16_计算() {
+        // 前缀前含两个汉字（BMP，每字 1 个 UTF-16 码元）。
+        let line = "打印 dzh";
+        let (text, range) = latin_prefix_at(line, 0, line.chars().count()).unwrap();
+        assert_eq!(text, "dzh");
+        assert_eq!(range.start.character, 3);
+        assert_eq!(range.end.character, 6);
+    }
+
+    #[test]
+    fn 关闭拼音后回退普通补全() {
+        let src = "dzh";
+        let index = Index::build("file:///t.凡", src);
+        let mut options = PinyinOptions::sensible_default();
+        options.enabled = false;
+        let items = index.completion_with_options(0, src.chars().count(), &options);
+        // 普通根补全不含 filter_text，且仍返回完整符号集。
+        assert!(items.iter().all(|i| i.filter_text.is_none()));
+        assert!(items.iter().any(|i| i.label == "函数"));
+    }
+
+    #[test]
+    fn 非拉丁前缀不触发拼音路径() {
+        assert!(latin_prefix_at("打招呼", 0, 3).is_none());
+        assert!(latin_prefix_at("a1", 0, 2).is_none());
+    }
+
+    #[test]
+    fn 候选数受上限约束() {
+        let src = "h";
+        let index = Index::build("file:///t.凡", src);
+        let mut options = PinyinOptions::sensible_default();
+        options.max_suggest = 1;
+        let items = index.completion_with_options(0, src.chars().count(), &options);
+        assert!(items.len() <= 1, "实际数量：{}", items.len());
     }
 }

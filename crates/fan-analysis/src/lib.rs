@@ -29,6 +29,8 @@ pub mod mixfixcheck;
 pub mod nativecheck;
 /// file:// URI 与路径互转。
 pub mod paths;
+/// 拼音/双拼编码与匹配（LSP 打拼音补中文）。
+pub mod pinyin;
 /// 编辑器查询：悬停、定义跳转、补全。
 pub mod query;
 /// 函数体内静态作用域收集。
