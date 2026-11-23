@@ -5,7 +5,7 @@
 
 use crate::document::Document;
 use crate::index::Index;
-use crate::pinyin::{codes_of, is_latin_prefix, matches_input, InputSchemes, PinyinOptions};
+use crate::pinyin::{PinyinEngine, PinyinOptions};
 use crate::symbol::{Symbol, SymbolKind};
 use crate::utf16::{is_letter, utf16_column, utf16_to_rune_col, word_at, WordMatch};
 
@@ -172,7 +172,7 @@ impl Index {
         self.completion_with_options(line0, char16, &PinyinOptions::default())
     }
 
-    /// 带拼音/双拼配置的补全查询。
+    /// 带拼音/双拼配置的补全查询（不注入引擎，仅内置候选由调用方另行注入）。
     ///
     /// 成员补全（`.`/`的`）与模型字段补全优先；其余情况下若光标前是拉丁前缀
     /// 且启用了拼音补全，则在关键字与项目符号上做全拼/首字母/双拼前缀匹配。
@@ -181,6 +181,17 @@ impl Index {
         line0: usize,
         char16: usize,
         options: &PinyinOptions,
+    ) -> Vec<CompletionItem> {
+        self.completion_with_engine(line0, char16, options, &crate::pinyin::NullEngine)
+    }
+
+    /// 带引擎注入的补全查询，由 LSP 组合根在启动时提供具体 [`PinyinEngine`]。
+    pub fn completion_with_engine(
+        &self,
+        line0: usize,
+        char16: usize,
+        options: &PinyinOptions,
+        engine: &dyn PinyinEngine,
     ) -> Vec<CompletionItem> {
         let doc = self.root();
         let line = doc.line_text(line0 + 1);
@@ -193,7 +204,7 @@ impl Index {
         }
         if options.enabled {
             if let Some((input, range)) = latin_prefix_at(line, line0, char16) {
-                let pinyin_items = self.pinyin_completions(&input, range, options);
+                let pinyin_items = self.pinyin_completions(&input, range, options, engine);
                 if !pinyin_items.is_empty() {
                     return pinyin_items;
                 }
@@ -202,74 +213,94 @@ impl Index {
         self.root_completions()
     }
 
-    /// 在关键字、本文件符号、导入模块符号与外挂词条上做拼音前缀匹配。
+    /// 在关键字、本文件符号、导入模块符号与引擎自由词上做拼音前缀匹配。
+    ///
+    /// 候选按来源分层（tier）：关键字 0、本文件符号 1、导入模块符号 2、引擎
+    /// 自由词 3；排序时 tier 优先于匹配精度，确保关键字/项目符号永远排在
+    /// 引擎候选之前。
     fn pinyin_completions(
         &self,
         input: &str,
         replace_range: Range,
         options: &PinyinOptions,
+        engine: &dyn PinyinEngine,
     ) -> Vec<CompletionItem> {
-        // (label, kind, detail) 去重后的候选池。
-        let mut pool: Vec<(String, SymbolKind, String)> = Vec::new();
+        // (label, kind, detail, tier) 去重后的候选池。
+        let mut pool: Vec<(String, SymbolKind, String, u8)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        let mut push = |label: String, kind: SymbolKind, detail: String| {
+        let mut push = |label: String, kind: SymbolKind, detail: String, tier: u8| {
             if seen.insert(label.clone()) {
-                pool.push((label, kind, detail));
+                pool.push((label, kind, detail, tier));
             }
         };
 
         for kw in COMPLETION_KEYWORDS {
-            push((*kw).to_string(), KEYWORD_KIND, "关键字".to_string());
+            push((*kw).to_string(), KEYWORD_KIND, "关键字".to_string(), 0);
         }
         for sym in &self.root().top_levels {
-            push(sym.name.clone(), sym.kind, sym.detail.clone());
+            push(sym.name.clone(), sym.kind, sym.detail.clone(), 1);
         }
         for (name, imp) in &self.root().imports {
-            push(name.clone(), SymbolKind::Module, imp.path.clone());
+            push(name.clone(), SymbolKind::Module, imp.path.clone(), 2);
             if let Some(full) = self.resolve(&imp.path) {
                 let mod_uri = crate::paths::path_to_uri(&full);
                 if let Some(mod_doc) = self.all_docs().find(|d| d.uri == mod_uri) {
                     for sym in &mod_doc.top_levels {
-                        push(sym.name.clone(), sym.kind, sym.detail.clone());
+                        push(sym.name.clone(), sym.kind, sym.detail.clone(), 2);
                     }
                 }
             }
         }
-        for word in &options.external_words {
-            push(word.clone(), SymbolKind::Variable, "外挂词库".to_string());
+        for cand in engine.suggest(input, options) {
+            push(cand.word, SymbolKind::Variable, cand.detail, 3);
         }
 
-        // 仅含汉字（或汉字为主）的 label 才计算拼音；纯英文 label 交给普通补全。
-        let mut matched: Vec<(CompletionItem, usize)> = Vec::new();
-        for (label, kind, detail) in pool {
-            if !label
+        // 仅含汉字的 label 才参与拼音：tier 0–2 交给引擎 rank 判定；引擎自由词
+        // （tier 3）由引擎自行保证可匹配，直接纳入并排在最后。
+        let mut matched: Vec<(CompletionItem, u8, usize)> = Vec::new();
+        for (label, kind, detail, tier) in pool {
+            let has_cjk = label
                 .chars()
-                .any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c))
-            {
+                .any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c));
+            if !has_cjk {
                 continue;
             }
-            let codes = codes_of(&label, options.double_scheme);
-            if !matches_input(input, &codes, options.schemes) {
+            if tier == 3 {
+                matched.push((
+                    CompletionItem {
+                        label,
+                        kind,
+                        detail,
+                        doc: String::new(),
+                        filter_text: Some(input.to_string()),
+                        replace_range: Some(replace_range),
+                    },
+                    tier,
+                    usize::MAX,
+                ));
                 continue;
             }
-            let rank = rank_match(input, &codes, options.schemes);
-            let filter_text = format!("{} {} {}", codes.full, codes.initial, codes.double);
+            let Some(m) = engine.rank(input, &label, options) else {
+                continue;
+            };
             matched.push((
                 CompletionItem {
                     label,
                     kind,
                     detail,
                     doc: String::new(),
-                    filter_text: Some(filter_text),
+                    filter_text: Some(m.filter_text),
                     replace_range: Some(replace_range),
                 },
-                rank,
+                tier,
+                m.rank,
             ));
         }
 
-        // 排序：匹配精度（rank 小者优先）→ label 长度 → label 字典序，保证确定性。
+        // 排序：来源层级 → 匹配精度（rank 小者优先）→ label 长度 → 字典序，保证确定性。
         matched.sort_by(|a, b| {
             a.1.cmp(&b.1)
+                .then_with(|| a.2.cmp(&b.2))
                 .then_with(|| a.0.label.chars().count().cmp(&b.0.label.chars().count()))
                 .then_with(|| a.0.label.cmp(&b.0.label))
         });
@@ -281,7 +312,7 @@ impl Index {
         matched
             .into_iter()
             .take(limit)
-            .map(|(item, _)| item)
+            .map(|(item, _, _)| item)
             .collect()
     }
 
@@ -701,7 +732,7 @@ fn latin_prefix_at(line: &str, line0: usize, char16: usize) -> Option<(String, R
         return None;
     }
     let text: String = runes[start..end].iter().collect();
-    if !is_latin_prefix(&text) {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_alphabetic()) {
         return None;
     }
     // rune 列（0-based）转 UTF-16 列：起始 rune 之前的码元数。
@@ -720,29 +751,6 @@ fn latin_prefix_at(line: &str, line0: usize, char16: usize) -> Option<(String, R
             },
         },
     ))
-}
-
-/// 计算匹配精度排名（越小越优先）：双拼精确 < 双拼前缀 < 全拼精确 <
-/// 全拼前缀 < 首字母精确 < 首字母前缀；未参与的模式排到最后。
-fn rank_match(input: &str, codes: &crate::pinyin::PinyinCodes, schemes: InputSchemes) -> usize {
-    let lower = input.to_ascii_lowercase();
-    let exact = |code: &str| code == lower;
-    let prefix = |code: &str| code.starts_with(&lower);
-    if schemes.double && exact(&codes.double) {
-        0
-    } else if schemes.double && prefix(&codes.double) {
-        1
-    } else if schemes.full && exact(&codes.full) {
-        2
-    } else if schemes.full && prefix(&codes.full) {
-        3
-    } else if schemes.initial && exact(&codes.initial) {
-        4
-    } else if schemes.initial && prefix(&codes.initial) {
-        5
-    } else {
-        6
-    }
 }
 
 /// 判断光标是否位于 `模型{…}` 复合字面量的字段名位置，返回模型名。
@@ -811,6 +819,30 @@ fn format_hover(sym: &Symbol) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pinyin::{EngineCandidate, PinyinMatch};
+
+    /// 测试用桩引擎：按输入与词的简单包含关系给分，不依赖任何读音数据，
+    /// 仅用于验证候选编排与来源层级排序；真实算法在 fan-pinyin 的 BuiltinEngine。
+    #[derive(Default)]
+    struct StubEngine {
+        free_words: Vec<EngineCandidate>,
+    }
+
+    impl PinyinEngine for StubEngine {
+        fn rank(&self, input: &str, word: &str, _opts: &PinyinOptions) -> Option<PinyinMatch> {
+            if input.is_empty() {
+                return None;
+            }
+            Some(PinyinMatch {
+                rank: word.chars().count(),
+                filter_text: format!("{input}::{word}"),
+            })
+        }
+
+        fn suggest(&self, _input: &str, _opts: &PinyinOptions) -> Vec<EngineCandidate> {
+            self.free_words.clone()
+        }
+    }
 
     const SRC: &str = "\
 # 打招呼函数
@@ -889,7 +921,12 @@ mod tests {
         let src = format!("{SRC}dzh");
         let index = Index::build("file:///t.凡", &src);
         let line0 = src.lines().count() - 1;
-        let items = index.completion_with_options(line0, 3, &PinyinOptions::sensible_default());
+        let engine = StubEngine::default();
+        let options = PinyinOptions {
+            max_suggest: 0,
+            ..PinyinOptions::sensible_default()
+        };
+        let items = index.completion_with_engine(line0, 3, &options, &engine);
         let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
         assert!(labels.contains(&"打招呼".to_string()), "实际：{labels:?}");
         let hit = items
@@ -901,16 +938,47 @@ mod tests {
     }
 
     #[test]
-    fn 拼音全拼补全关键字() {
+    fn 拼音路径返回含关键字与符号的候选() {
         let src = "hanshu";
         let index = Index::build("file:///t.凡", src);
         let options = PinyinOptions::sensible_default();
-        let items = index.completion_with_options(0, src.chars().count(), &options);
+        let engine = StubEngine::default();
+        let items = index.completion_with_engine(0, src.chars().count(), &options, &engine);
+        // 桩引擎对所有 CJK 词给命中，候选池应同时含关键字与项目符号。
         assert!(
             items.iter().any(|i| i.label == "函数"),
-            "全拼 hanshu 应命中 函数：{:?}",
+            "应含关键字 函数：{:?}",
             items.iter().map(|i| &i.label).collect::<Vec<_>>()
         );
+        assert!(items.iter().all(|i| i.filter_text.is_some()));
+    }
+
+    #[test]
+    fn 引擎自由词排在关键字与符号之后() {
+        let src = "h";
+        let index = Index::build("file:///t.凡", src);
+        let options = PinyinOptions {
+            max_suggest: 0,
+            ..PinyinOptions::sensible_default()
+        };
+        let engine = StubEngine {
+            free_words: vec![EngineCandidate {
+                word: "自定义自由词".to_string(),
+                detail: "Rime".to_string(),
+                weight: 1,
+            }],
+        };
+        let items = index.completion_with_engine(0, src.chars().count(), &options, &engine);
+        let free_pos = items
+            .iter()
+            .position(|i| i.label == "自定义自由词")
+            .expect("应含引擎自由词");
+        let kw_pos = items
+            .iter()
+            .position(|i| i.detail == "关键字")
+            .expect("应含关键字");
+        assert!(kw_pos < free_pos, "关键字必须排在引擎自由词之前");
+        assert_eq!(items[free_pos].detail, "Rime");
     }
 
     #[test]
@@ -939,7 +1007,8 @@ mod tests {
         let index = Index::build("file:///t.凡", src);
         let mut options = PinyinOptions::sensible_default();
         options.enabled = false;
-        let items = index.completion_with_options(0, src.chars().count(), &options);
+        let engine = StubEngine::default();
+        let items = index.completion_with_engine(0, src.chars().count(), &options, &engine);
         // 普通根补全不含 filter_text，且仍返回完整符号集。
         assert!(items.iter().all(|i| i.filter_text.is_none()));
         assert!(items.iter().any(|i| i.label == "函数"));
@@ -957,7 +1026,8 @@ mod tests {
         let index = Index::build("file:///t.凡", src);
         let mut options = PinyinOptions::sensible_default();
         options.max_suggest = 1;
-        let items = index.completion_with_options(0, src.chars().count(), &options);
+        let engine = StubEngine::default();
+        let items = index.completion_with_engine(0, src.chars().count(), &options, &engine);
         assert!(items.len() <= 1, "实际数量：{}", items.len());
     }
 }

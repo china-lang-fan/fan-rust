@@ -1,0 +1,12 @@
+[package]
+name = "fan-pinyin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "凡语言拼音/双拼编码与内置补全引擎，实现 fan-analysis 的 PinyinEngine 抽象"
+
+[dependencies]
+fan-analysis = { workspace = true }
+# 汉字转无声调拼音，供内置引擎计算全拼、首字母与音节拆分。
+pinyin = { workspace = true }

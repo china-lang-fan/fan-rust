@@ -67,7 +67,6 @@ dependencies = [
  "fan-ast",
  "fan-native",
  "fan-parser",
- "pinyin",
 ]
 
 [[package]]
@@ -125,6 +124,7 @@ dependencies = [
  "fan-analysis",
  "fan-ast",
  "fan-parser",
+ "fan-pinyin",
  "serde_json",
 ]
 
@@ -161,6 +161,14 @@ version = "0.9.0"
 dependencies = [
  "fan-ast",
  "fan-lexer",
+]
+
+[[package]]
+name = "fan-pinyin"
+version = "0.9.0"
+dependencies = [
+ "fan-analysis",
+ "pinyin",
 ]
 
 [[package]]

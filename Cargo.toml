@@ -10,6 +10,7 @@ members = [
     "crates/fan-testrun",
     "crates/fan-cli",
     "crates/fan-analysis",
+    "crates/fan-pinyin",
     "crates/fan-lsp",
     "crates/fan-mod",
     "crates/fan-code",
@@ -31,6 +32,7 @@ fan-eval = { path = "crates/fan-eval" }
 fan-native = { path = "crates/fan-native" }
 fan-testrun = { path = "crates/fan-testrun" }
 fan-analysis = { path = "crates/fan-analysis" }
+fan-pinyin = { path = "crates/fan-pinyin" }
 fan-lsp = { path = "crates/fan-lsp" }
 fan-mod = { path = "crates/fan-mod" }
 fan-code = { path = "crates/fan-code" }

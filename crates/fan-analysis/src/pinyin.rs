@@ -1,24 +1,18 @@
-//! 拼音/双拼编码与匹配，供 LSP 的“打拼音补中文”使用。
+//! 拼音补全的配置 DTO 与引擎抽象（不含任何实现）。
 //!
-//! 设计：先借助 `pinyin` crate 把每个汉字转为无声调全拼音节，再在其之上
-//! 计算三种编码：
-//! - 全拼（full）：各字音节直接拼接，如 `打招呼 → dazhaohu`；
-//! - 首字母（initial）：各字音节首字母拼接，如 `打招呼 → dzh`；
-//! - 双拼（double）：每个音节拆成声母+韵母，按选定方案各映射到一个键，
-//!   每字固定两键。键位表严格对齐 Rime 官方双拼方案（自然码/小鹤）的
-//!   `speller/algebra`，含零声母（a/o/e 开头）与 `j/q/x/y + u` 的规则。
+//! 本模块只定义数据结构与 [`PinyinEngine`] trait，保持 `fan-analysis` 对
+//! 读音数据、文件系统与动态库零依赖。具体实现由独立 crate 提供：
+//! - 内置引擎 `BuiltinEngine`（全拼/首字母/双拼）位于 `fan-pinyin`；
+//! - 可选的 librime 后端在 `fan-lsp` 组合根以动态加载方式注入。
 //!
-//! ## 后续演进：外挂词库与自由中文输入
+//! ## 后续演进：librime 与自由中文输入
 //!
-//! 本期只对“语言关键字 + 项目符号”这些有限、可枚举的词做内存匹配，不打包
-//! 通用大词库。若将来需要注释/字符串里的自由整句输入，推荐演进路线是接入
-//! [librime](https://github.com/rime/librime)（Rime 引擎，可内嵌的跨平台
-//! 纯引擎库，不依赖系统 IME 守护进程），以 sidecar 或 FFI 形式提供整句组字，
-//! 并通过下方 [`PinyinOptions::external_words`] 的外挂词库入口接入；不建议直接
-//! 调用各平台系统输入法接口（IBus/Fcitx/IMK/TSF），因为 LSP 是无窗口的 stdio
-//! 子进程，拿不到编辑器的输入上下文。
-
-use pinyin::ToPinyin;
+//! 本期只对“语言关键字 + 项目符号”这些有限、可枚举的词做匹配，不打包通用
+//! 大词库。若将来需要注释/字符串里的自由整句输入，推荐接入
+//! [librime](https://github.com/rime/librime)（可内嵌的跨平台纯引擎库，不
+//! 依赖系统 IME 守护进程），在 `fan-lsp` 内实现同一 trait 并通过运行时
+//! dlopen 加载；不直接调用各平台系统输入法接口（IBus/Fcitx/IMK/TSF），
+//! 因为 LSP 是无窗口的 stdio 子进程，拿不到编辑器的输入上下文。
 
 /// 双拼键位方案。键位对齐 Rime `rime-double-pinyin` 仓库的同名方案。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -36,90 +30,6 @@ impl DoublePinyinScheme {
         match s.trim().to_ascii_lowercase().as_str() {
             "xiaohe" | "flypy" | "小鹤" => Self::Xiaohe,
             _ => Self::Ziranma,
-        }
-    }
-
-    /// 零声母音节（a/o/e 开头）的双拼两键，对齐 Rime `derive/^([aoe])([ioun])$/`
-    /// 与 `xform/^([aoe])(ng)?$/`：首字母双写 + 韵母键。
-    ///
-    /// 韵母键直接对**完整音节**查表（如 `an→j`、`en→f`）；仅当完整音节不是
-    /// 登记韵母（单韵母 `a/o/e` 或 `ng` 收尾的特殊形）时，才退回首字母本身。
-    fn zero_initial(&self, syllable: &str) -> Option<String> {
-        let first = syllable.chars().next()?;
-        let final_key = self.final_key(syllable).unwrap_or(first);
-        Some(format!("{first}{final_key}"))
-    }
-
-    /// 韵母（含零声母首字双写后留下的 `ng`/单韵母等）到键的映射。
-    fn final_key(&self, fin: &str) -> Option<char> {
-        let key = match self {
-            // 自然码：Rime double_pinyin.schema.yaml 的 algebra。
-            DoublePinyinScheme::Ziranma => match fin {
-                "iu" => 'q',
-                "ia" | "ua" => 'w',
-                "uan" | "van" => 'r',
-                "ue" | "ve" => 't',
-                "ing" | "uai" => 'y',
-                "uo" => 'o',
-                "un" | "vn" => 'p',
-                "iong" | "ong" => 's',
-                "iang" | "uang" => 'd',
-                "en" => 'f',
-                "eng" => 'g',
-                "ang" => 'h',
-                "an" => 'j',
-                "ao" => 'k',
-                "ai" => 'l',
-                "ei" => 'z',
-                "ie" => 'x',
-                "ui" => 'v',
-                "ou" => 'b',
-                "in" => 'n',
-                "ian" => 'm',
-                // 零声母的单韵母与 ng 收尾特殊形，键取其首字母。
-                "a" | "o" | "e" | "i" | "u" | "ng" => fin.chars().next()?,
-                _ => return None,
-            },
-            // 小鹤：Rime double_pinyin_flypy.schema.yaml 的 algebra。
-            DoublePinyinScheme::Xiaohe => match fin {
-                "iu" => 'q',
-                "ei" => 'w',
-                "uan" => 'r',
-                "ue" | "ve" => 't',
-                "un" => 'y',
-                "uo" => 'o',
-                "ie" => 'p',
-                "iong" | "ong" => 's',
-                "ai" => 'd',
-                "en" => 'f',
-                "eng" => 'g',
-                "ang" => 'h',
-                "an" => 'j',
-                "ing" | "uai" => 'k',
-                "iang" | "uang" => 'l',
-                "ou" => 'z',
-                "ia" | "ua" => 'x',
-                "iao" => 'n',
-                "ao" => 'c',
-                "ui" => 'v',
-                "in" => 'b',
-                "ian" => 'm',
-                // 零声母的单韵母与 ng 收尾特殊形，键取其首字母。
-                "a" | "o" | "e" | "i" | "u" | "ng" => fin.chars().next()?,
-                _ => return None,
-            },
-        };
-        Some(key)
-    }
-
-    /// 声母到键的映射。`zh/ch/sh` 在两套方案里同为 v/i/u，其余声母键即其首字母。
-    fn initial_key(init: &str) -> Option<char> {
-        match init {
-            "zh" => Some('v'),
-            "ch" => Some('i'),
-            "sh" => Some('u'),
-            // b p m f d t n l g k h j q x r z c s y w 都用自身首字母。
-            other => other.chars().next(),
         }
     }
 }
@@ -157,209 +67,70 @@ pub struct PinyinOptions {
     pub schemes: InputSchemes,
     /// 双拼键位方案。
     pub double_scheme: DoublePinyinScheme,
-    /// 外挂词库词条（预留：本期只支持内存注入，后续可由词库文件/librime 填充）。
-    pub external_words: Vec<String>,
+    /// 引擎选择：`auto`/`builtin` 用内置引擎，`rime` 尝试外部引擎（缺失则回退）。
+    pub engine: String,
 }
 
 impl PinyinOptions {
-    /// 一套合理的默认配置：启用、上限 50、三模式全开、自然码。
+    /// 一套合理的默认配置：启用、上限 50、三模式全开、自然码、自动引擎。
     pub fn sensible_default() -> Self {
         Self {
             enabled: true,
             max_suggest: 50,
             schemes: InputSchemes::default(),
             double_scheme: DoublePinyinScheme::default(),
-            external_words: Vec::new(),
+            engine: "auto".to_string(),
         }
     }
 }
 
-/// 一个中文词预计算出的全部编码。
+/// 单个已知词（关键字/项目符号）对当前输入的匹配结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PinyinCodes {
-    /// 全拼串，如 `dazhaohu`。
-    pub full: String,
-    /// 首字母串，如 `dzh`。
-    pub initial: String,
-    /// 双拼串（按当前方案），每字两键拼接。
-    pub double: String,
+pub struct PinyinMatch {
+    /// 匹配精度分，数值越小越优先（具体量纲由引擎定义，仅用于同引擎内排序）。
+    pub rank: usize,
+    /// 客户端过滤文本：填入拉丁编码，避免输入字母时中文 label 被编辑器过滤。
+    pub filter_text: String,
 }
 
-/// 把一个汉字音节拆为 `(声母, 韵母)`；零声母字返回 `("", 整个音节)`。
-/// 声母按最长匹配（zh/ch/sh 优先）。
-pub fn split_syllable(syllable: &str) -> (&str, &str) {
-    const INITIALS: &[&str] = &[
-        "zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l", "g", "k", "h", "j", "q", "x",
-        "r", "z", "c", "s", "y", "w",
-    ];
-    for init in INITIALS {
-        if let Some(rest) = syllable.strip_prefix(init) {
-            return (init, rest);
-        }
-    }
-    ("", syllable)
+/// 引擎自有自由词候选（内置引擎不产生，由 librime 等外部引擎返回）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineCandidate {
+    /// 候选词文本。
+    pub word: String,
+    /// 来源标记，展示在补全 detail（如 `Rime`）。
+    pub detail: String,
+    /// 引擎侧词频/权重，数值越大越靠前（仅用于引擎候选内部排序）。
+    pub weight: u32,
 }
 
-/// 单个无声调音节按方案转双拼两键。
-fn syllable_to_double(syllable: &str, scheme: DoublePinyinScheme) -> Option<String> {
-    // 零声母（a/o/e 开头）走首字母双写规则。
-    if matches!(syllable.chars().next(), Some('a' | 'o' | 'e')) {
-        return scheme.zero_initial(syllable);
-    }
-    let (init, fin) = split_syllable(syllable);
-    let init_key = DoublePinyinScheme::initial_key(init)?;
-    let fin_key = scheme.final_key(fin)?;
-    Some(format!("{init_key}{fin_key}"))
-}
-
-/// 计算一个中文词（可含非汉字字符）的全拼、首字母与双拼编码。
+/// 拼音补全引擎抽象。实现位于 `fan-pinyin`（内置）或 `fan-lsp`（外部动态后端）。
 ///
-/// 非汉字字符（ASCII 字母/数字等）原样保留并参与全拼，不计入双拼/首字母；
-/// 多音字取 `pinyin` crate 的默认读音。
-pub fn codes_of(word: &str, scheme: DoublePinyinScheme) -> PinyinCodes {
-    let mut full = String::new();
-    let mut initial = String::new();
-    let mut double = String::new();
-    for (ch, py) in word.chars().zip(word.to_pinyin()) {
-        match py {
-            Some(p) => {
-                let syllable = p.plain();
-                full.push_str(syllable);
-                if let Some(first) = syllable.chars().next() {
-                    initial.push(first);
-                }
-                if let Some(two) = syllable_to_double(syllable, scheme) {
-                    double.push_str(&two);
-                }
-            }
-            None => {
-                // 非汉字：全拼原样保留，便于英文/混合标识符匹配。
-                full.push(ch);
-            }
-        }
-    }
-    PinyinCodes {
-        full,
-        initial,
-        double,
-    }
+/// 实现必须是 `Send + Sync`，以便 LSP 在防抖线程间共享。
+pub trait PinyinEngine: Send + Sync {
+    /// 对候选池里的一个已知词判定是否命中当前拉丁输入，命中则给精度分与过滤文本。
+    fn rank(&self, input: &str, word: &str, opts: &PinyinOptions) -> Option<PinyinMatch>;
+    /// 返回引擎自有的自由词候选；不支持自由词的引擎返回空数组。
+    fn suggest(&self, input: &str, opts: &PinyinOptions) -> Vec<EngineCandidate>;
 }
 
-/// 判断输入的拉丁前缀是否命中某组编码（按启用的模式做前缀匹配）。
-pub fn matches_input(input: &str, codes: &PinyinCodes, schemes: InputSchemes) -> bool {
-    if input.is_empty() {
-        return false;
-    }
-    let lower = input.to_ascii_lowercase();
-    (schemes.full && codes.full.starts_with(&lower))
-        || (schemes.initial && codes.initial.starts_with(&lower))
-        || (schemes.double && codes.double.starts_with(&lower))
-}
+/// 空引擎：两个方法分别返回 None/空，供无实现注入时（如纯逻辑单测、旧入口）使用。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NullEngine;
 
-/// 判断字符串是否为可触发拼音补全的拉丁前缀（纯 ASCII 字母，至少一个）。
-pub fn is_latin_prefix(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphabetic())
+impl PinyinEngine for NullEngine {
+    fn rank(&self, _input: &str, _word: &str, _opts: &PinyinOptions) -> Option<PinyinMatch> {
+        None
+    }
+
+    fn suggest(&self, _input: &str, _opts: &PinyinOptions) -> Vec<EngineCandidate> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn 全拼与首字母() {
-        let c = codes_of("打招呼", DoublePinyinScheme::Ziranma);
-        assert_eq!(c.full, "dazhaohu");
-        assert_eq!(c.initial, "dzh");
-    }
-
-    #[test]
-    fn 音节拆分() {
-        assert_eq!(split_syllable("shuang"), ("sh", "uang"));
-        assert_eq!(split_syllable("an"), ("", "an"));
-        assert_eq!(split_syllable("da"), ("d", "a"));
-    }
-
-    #[test]
-    fn 自然码零声母() {
-        assert_eq!(
-            syllable_to_double("an", DoublePinyinScheme::Ziranma),
-            Some("aj".to_string())
-        );
-        assert_eq!(
-            syllable_to_double("en", DoublePinyinScheme::Ziranma),
-            Some("ef".to_string())
-        );
-        assert_eq!(
-            syllable_to_double("ang", DoublePinyinScheme::Ziranma),
-            Some("ah".to_string())
-        );
-    }
-
-    #[test]
-    fn 小鹤零声母() {
-        assert_eq!(
-            syllable_to_double("an", DoublePinyinScheme::Xiaohe),
-            Some("aj".to_string())
-        );
-        assert_eq!(
-            syllable_to_double("en", DoublePinyinScheme::Xiaohe),
-            Some("ef".to_string())
-        );
-    }
-
-    #[test]
-    fn 自然码普通字双拼() {
-        assert_eq!(
-            syllable_to_double("da", DoublePinyinScheme::Ziranma),
-            Some("da".to_string())
-        );
-        // 双 shuang：sh→u，uang→d。
-        assert_eq!(
-            syllable_to_double("shuang", DoublePinyinScheme::Ziranma),
-            Some("ud".to_string())
-        );
-    }
-
-    #[test]
-    fn 小鹤普通字双拼() {
-        // 双 shuang：sh→u，uang→l。
-        assert_eq!(
-            syllable_to_double("shuang", DoublePinyinScheme::Xiaohe),
-            Some("ul".to_string())
-        );
-    }
-
-    #[test]
-    fn 前缀匹配三种模式() {
-        let c = codes_of("打招呼", DoublePinyinScheme::Ziranma);
-        let all = InputSchemes::default();
-        assert!(matches_input("dazhao", &c, all));
-        assert!(matches_input("dzh", &c, all));
-        // 双拼半程也能前缀命中。
-        assert!(matches_input(&c.double[..2], &c, all));
-        assert!(!matches_input("xyz", &c, all));
-        assert!(!matches_input("", &c, all));
-    }
-
-    #[test]
-    fn 模式开关生效() {
-        let c = codes_of("函数", DoublePinyinScheme::Ziranma);
-        let only_initial = InputSchemes {
-            full: false,
-            initial: true,
-            double: false,
-        };
-        assert!(matches_input("hs", &c, only_initial));
-        assert!(!matches_input("hanshu", &c, only_initial));
-    }
-
-    #[test]
-    fn 拉丁前缀判定() {
-        assert!(is_latin_prefix("dzh"));
-        assert!(!is_latin_prefix("打"));
-        assert!(!is_latin_prefix("a1"));
-        assert!(!is_latin_prefix(""));
-    }
 
     #[test]
     fn 方案解析回退() {
@@ -375,5 +146,13 @@ mod tests {
             DoublePinyinScheme::parse("anything"),
             DoublePinyinScheme::Ziranma
         );
+    }
+
+    #[test]
+    fn 空引擎不产候选() {
+        let engine = NullEngine;
+        let opts = PinyinOptions::sensible_default();
+        assert!(engine.rank("dzh", "打招呼", &opts).is_none());
+        assert!(engine.suggest("dzh", &opts).is_empty());
     }
 }

@@ -13,10 +13,11 @@ use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 
-use fan_analysis::pinyin::{DoublePinyinScheme, InputSchemes, PinyinOptions};
+use fan_analysis::pinyin::{DoublePinyinScheme, InputSchemes, PinyinEngine, PinyinOptions};
 use fan_analysis::symbol::SymbolKind;
 use fan_analysis::utf16::utf16_column;
 use fan_analysis::{analyze_index, Diagnostic, Index, Severity};
+use fan_pinyin::BuiltinEngine;
 
 use crate::protocol::{completion_kind, error_code, severity, PUBLISH_DEBOUNCE_MS};
 use crate::protocol::{JsonRpcError, JsonRpcMessage};
@@ -51,6 +52,8 @@ pub struct Server {
     debouncer: Option<thread::JoinHandle<()>>,
     /// 拼音/双拼补全配置，由 initialize 的 initializationOptions 注入。
     pinyin: Arc<Mutex<PinyinOptions>>,
+    /// 拼音补全引擎：当前为内置纯 Rust 引擎；未来可按配置替换为 librime 动态后端。
+    engine: Arc<dyn PinyinEngine>,
 }
 
 impl Server {
@@ -65,6 +68,7 @@ impl Server {
             schedule_rx: Some(schedule_rx),
             debouncer: None,
             pinyin: Arc::new(Mutex::new(PinyinOptions::sensible_default())),
+            engine: Arc::new(BuiltinEngine),
         }
     }
 
@@ -378,6 +382,11 @@ impl Server {
             }
             options.schemes = input;
         }
+        if let Some(v) = lookup("engine", "engine") {
+            if let Some(s) = v.as_str() {
+                options.engine = s.trim().to_ascii_lowercase();
+            }
+        }
         *self.pinyin.lock().unwrap() = options;
     }
 
@@ -491,9 +500,10 @@ impl Server {
 
     fn on_completion(&self, id: Option<Value>, params: &Value) {
         let options = self.pinyin.lock().unwrap().clone();
+        let engine = Arc::clone(&self.engine);
         let result = self.with_position(params, |index, line, character| {
             let items: Vec<Value> = index
-                .completion_with_options(line, character, &options)
+                .completion_with_engine(line, character, &options, engine.as_ref())
                 .into_iter()
                 .map(|item| {
                     let kind = if item.detail == "关键字" {
