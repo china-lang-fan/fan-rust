@@ -125,6 +125,7 @@ dependencies = [
  "fan-ast",
  "fan-parser",
  "fan-pinyin",
+ "libloading",
  "serde_json",
 ]
 

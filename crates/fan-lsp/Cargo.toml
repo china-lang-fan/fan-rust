@@ -12,3 +12,5 @@ fan-pinyin = { workspace = true }
 fan-ast = { workspace = true }
 fan-parser = { workspace = true }
 serde_json = { workspace = true }
+# 运行时 dlopen librime（可选后端）；缺库即回退内置引擎，不产生链接期依赖。
+libloading = "0.8"

@@ -6,6 +6,8 @@
 
 /// LSP 协议结构体（serde 序列化）。
 pub mod protocol;
+/// librime 可选动态后端（运行时 dlopen，缺失即回退内置引擎）。
+pub mod rime;
 /// LSP 服务器主循环、文档生命周期与防抖诊断。
 pub mod server;
 /// stdio 上的 `Content-Length` 分帧读写。

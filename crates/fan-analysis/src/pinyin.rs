@@ -69,6 +69,14 @@ pub struct PinyinOptions {
     pub double_scheme: DoublePinyinScheme,
     /// 引擎选择：`auto`/`builtin` 用内置引擎，`rime` 尝试外部引擎（缺失则回退）。
     pub engine: String,
+    /// librime 动态库的显式路径；为空时按平台默认库名探测。
+    pub rime_lib_path: String,
+    /// Rime shared data 目录（方案 yaml 等）；为空时交给 librime 默认值。
+    pub rime_shared_data_dir: String,
+    /// Rime user data 目录（用户词库/构建产物）；为空时交给 librime 默认值。
+    pub rime_user_data_dir: String,
+    /// 启动后切换的 schema id（如 `double_pinyin`）；为空则用 librime 当前方案。
+    pub rime_schema_id: String,
 }
 
 impl PinyinOptions {
@@ -80,6 +88,10 @@ impl PinyinOptions {
             schemes: InputSchemes::default(),
             double_scheme: DoublePinyinScheme::default(),
             engine: "auto".to_string(),
+            rime_lib_path: String::new(),
+            rime_shared_data_dir: String::new(),
+            rime_user_data_dir: String::new(),
+            rime_schema_id: String::new(),
         }
     }
 }

@@ -52,8 +52,9 @@ pub struct Server {
     debouncer: Option<thread::JoinHandle<()>>,
     /// 拼音/双拼补全配置，由 initialize 的 initializationOptions 注入。
     pinyin: Arc<Mutex<PinyinOptions>>,
-    /// 拼音补全引擎：当前为内置纯 Rust 引擎；未来可按配置替换为 librime 动态后端。
-    engine: Arc<dyn PinyinEngine>,
+    /// 拼音补全引擎：默认内置纯 Rust 引擎；engine=rime/auto 时尝试动态加载
+    /// librime，失败则回退内置。
+    engine: Mutex<Arc<dyn PinyinEngine>>,
 }
 
 impl Server {
@@ -68,7 +69,7 @@ impl Server {
             schedule_rx: Some(schedule_rx),
             debouncer: None,
             pinyin: Arc::new(Mutex::new(PinyinOptions::sensible_default())),
-            engine: Arc::new(BuiltinEngine),
+            engine: Mutex::new(Arc::new(BuiltinEngine)),
         }
     }
 
@@ -387,7 +388,47 @@ impl Server {
                 options.engine = s.trim().to_ascii_lowercase();
             }
         }
+        let read_str = |key: &str, flat: &str| -> String {
+            lookup(key, flat)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        options.rime_lib_path = read_str("rimeLibPath", "rime_lib_path");
+        options.rime_shared_data_dir = read_str("rimeSharedDataDir", "rime_shared_data_dir");
+        options.rime_user_data_dir = read_str("rimeUserDataDir", "rime_user_data_dir");
+        options.rime_schema_id = read_str("rimeSchemaId", "rime_schema_id");
+
+        // 引擎选择：builtin 强制内置；rime/auto 尝试动态加载 librime，失败回退内置。
+        let engine: Arc<dyn PinyinEngine> = if options.engine == "rime" || options.engine == "auto"
+        {
+            match crate::rime::RimeDynamicEngine::try_load(&options) {
+                Some(rime) => Arc::new(rime),
+                None => {
+                    if options.engine == "rime" {
+                        self.log_message(2, "未加载到 librime，拼音补全回退到内置引擎".to_string());
+                    }
+                    Arc::new(BuiltinEngine)
+                }
+            }
+        } else {
+            Arc::new(BuiltinEngine)
+        };
+
         *self.pinyin.lock().unwrap() = options;
+        *self.engine.lock().unwrap() = engine;
+    }
+
+    /// 向客户端发送 `window/logMessage`；无输出通道（如单元测试）时静默忽略。
+    fn log_message(&self, level: i64, message: String) {
+        let notification = JsonRpcMessage {
+            id: None,
+            method: Some("window/logMessage".to_string()),
+            params: json!({ "type": level, "message": message }),
+            result: None,
+            error: None,
+        };
+        let _ = self.send(&notification);
     }
 
     fn on_did_open(&self, params: &Value) {
@@ -500,7 +541,7 @@ impl Server {
 
     fn on_completion(&self, id: Option<Value>, params: &Value) {
         let options = self.pinyin.lock().unwrap().clone();
-        let engine = Arc::clone(&self.engine);
+        let engine = Arc::clone(&*self.engine.lock().unwrap());
         let result = self.with_position(params, |index, line, character| {
             let items: Vec<Value> = index
                 .completion_with_engine(line, character, &options, engine.as_ref())
@@ -904,6 +945,52 @@ mod tests {
             .map(|a| a.iter().any(|i| i.get("textEdit").is_some()))
             .unwrap_or(false);
         assert!(!has_text_edit, "关闭拼音后不应出现 textEdit：{comp}");
+    }
+
+    #[test]
+    fn rime库缺失时静默回退内置引擎且补全可用() {
+        let source = "hanshu";
+        let init = json!({
+            "initializationOptions": {
+                "pinyin": {
+                    "engine": "rime",
+                    "rimeLibPath": "/nonexistent/libfan-no-rime.so"
+                }
+            }
+        });
+        let mut input = String::new();
+        input.push_str(&frame("initialize", Some(json!(1)), init));
+        input.push_str(&frame(
+            "textDocument/didOpen",
+            None,
+            json!({ "textDocument": { "uri": "file:///q.凡", "languageId": "fan", "version": 1, "text": source } }),
+        ));
+        input.push_str(&frame(
+            "textDocument/completion",
+            Some(json!(5)),
+            json!({ "textDocument": { "uri": "file:///q.凡" }, "position": { "line": 0, "character": 6 } }),
+        ));
+        input.push_str(&frame("exit", None, Value::Null));
+
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        {
+            let mut reader = Cursor::new(input.into_bytes());
+            let mut server = Server::new();
+            server.run(&mut reader, SharedVec(output.clone())).unwrap();
+        }
+        let data = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let frames = read_frames(&data);
+        let comp = frames
+            .iter()
+            .find(|m| m.get("id") == Some(&json!(5)))
+            .expect("未收到 completion 响应");
+        // 回退到内置引擎后，全拼 hanshu 仍应命中关键字 函数。
+        let has_keyword = comp
+            .pointer("/result/items")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().any(|i| i.get("label") == Some(&json!("函数"))))
+            .unwrap_or(false);
+        assert!(has_keyword, "回退内置引擎后应能补全 函数：{comp}");
     }
 
     #[test]
