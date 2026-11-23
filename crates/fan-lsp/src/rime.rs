@@ -37,16 +37,19 @@ fn candidate_lib_names() -> &'static [&'static str] {
     }
 }
 
-// RimeApi 函数指针表中的下标（0 起，对齐 rime_api.h 声明顺序，跳过首字段
-// data_size）。仅收录本模块实际调用的函数；新增调用时按头文件顺序核对编号。
+// RimeApi 函数指针表中的下标（0 起），由 rime_api.h 的 rime_api_t 结构体按
+// 声明顺序机械编号（可用脚本提取 `(*name)` 后 nl -v0 复核）。跳过首字段
+// data_size；新增调用时务必从头文件重新核对，错位会导致错误函数调用。
 const IDX_SETUP: usize = 0;
+const IDX_START_MAINTENANCE: usize = 4;
+const IDX_JOIN_MAINTENANCE: usize = 6;
 const IDX_INITIALIZE: usize = 2;
 const IDX_FINALIZE: usize = 3;
-const IDX_CREATE_SESSION: usize = 7;
-const IDX_DESTROY_SESSION: usize = 9;
-const IDX_GET_CONTEXT: usize = 14;
-const IDX_FREE_CONTEXT: usize = 15;
-const IDX_SELECT_SCHEMA: usize = 26;
+const IDX_CREATE_SESSION: usize = 13;
+const IDX_DESTROY_SESSION: usize = 15;
+const IDX_GET_CONTEXT: usize = 23;
+const IDX_FREE_CONTEXT: usize = 24;
+const IDX_SELECT_SCHEMA: usize = 34;
 const IDX_SET_INPUT: usize = 89;
 
 type RimeSessionId = usize;
@@ -56,6 +59,8 @@ type Bool = c_int;
 type FnSetup = unsafe extern "C" fn(*mut RimeTraits);
 type FnInitialize = unsafe extern "C" fn(*mut RimeTraits);
 type FnFinalize = unsafe extern "C" fn();
+type FnStartMaintenance = unsafe extern "C" fn(Bool) -> Bool;
+type FnJoinMaintenance = unsafe extern "C" fn();
 type FnCreateSession = unsafe extern "C" fn() -> RimeSessionId;
 type FnDestroySession = unsafe extern "C" fn(RimeSessionId);
 type FnGetContext = unsafe extern "C" fn(RimeSessionId, *mut RimeContext) -> Bool;
@@ -233,7 +238,8 @@ impl RimeDynamicEngine {
         if data_size <= 0 {
             return None;
         }
-        // 函数指针槽总数 = data_size / 指针宽度；下标访问前据此做边界校验。
+        // data_size 是去掉首字段后的净字节数（见 RIME_STRUCT_INIT），函数指针
+        // 槽数 = data_size / 指针宽度；下标访问前据此做边界校验。
         let ptr_size = std::mem::size_of::<*const c_void>();
         let available_indices = (data_size as usize) / ptr_size;
 
@@ -253,10 +259,18 @@ impl RimeDynamicEngine {
         if index >= self.available_indices {
             return None;
         }
-        // 表基址跳过首字段 data_size，按指针宽度偏移。
+        // RimeApi 首字段 `int data_size`（4 字节）后有 4 字节对齐填充，函数指针
+        // 数组从结构体偏移 8 开始，每个槽 8 字节。注意是固定 8（4 字节字段 +
+        // 4 字节填充），不是 4 + 指针对齐；偏移 8 经真实 librime 1.10 实测确认。
+        // 槽地址只按 4 字节对齐，必须用 read_unaligned，否则触发 misaligned
+        // pointer dereference。
+        const TABLE_OFFSET: usize = 8;
         let base = self.api as *const u8;
-        let table = unsafe { base.add(std::mem::size_of::<c_int>()) } as *const *const c_void;
-        let raw = unsafe { *table.add(index) };
+        let table_addr = unsafe { base.add(TABLE_OFFSET) }.addr();
+        let slot_addr = table_addr + index * std::mem::size_of::<*const c_void>();
+        // SAFETY: 槽地址经 data_size 边界校验，落在 librime 分配的 RimeApi 内，
+        // 用 read_unaligned 读取不要求对齐；调用方保证 F 与头文件签名一致。
+        let raw = unsafe { (slot_addr as *const *const c_void).read_unaligned() };
         if raw.is_null() {
             return None;
         }
@@ -291,7 +305,21 @@ impl RimeDynamicEngine {
             initialize(&mut traits as *mut RimeTraits);
         }
 
-        // SAFETY: initialize 已完成，创建会话。
+        // 首次运行需要部署（构建 default.yaml 与各方案的 prism/table 产物），否则
+        // create_session 后引擎没有可用方案，get_context 拿不到候选。部署在后台
+        // 线程执行，必须 join 等待完成。失败不致命：仍尝试建会话，由后续取词兜底。
+        if let (Some(start), Some(join)) = (
+            self.symbol::<FnStartMaintenance>(IDX_START_MAINTENANCE),
+            self.symbol::<FnJoinMaintenance>(IDX_JOIN_MAINTENANCE),
+        ) {
+            // SAFETY: full_check=1 触发完整部署；join 阻塞至后台任务结束。
+            unsafe {
+                start(1);
+                join();
+            }
+        }
+
+        // SAFETY: initialize（及部署）已完成，创建会话。
         let session = unsafe { create_session() };
         if session == 0 {
             return None;
@@ -445,5 +473,36 @@ mod tests {
     fn 空配置字符串映射为none() {
         assert!(option_cstring("").is_none());
         assert!(option_cstring("data").is_some());
+    }
+
+    /// 真实 librime 端到端验证，默认 `#[ignore]`，不在常规 CI 中运行（CI 无
+    /// librime）。装有 librime 的环境用以下环境变量手动启用：
+    /// `FAN_TEST_RIME_LIB`（librime.so 路径）、`FAN_TEST_RIME_SHARED`、
+    /// `FAN_TEST_RIME_USER`、可选 `FAN_TEST_RIME_SCHEMA`，并以
+    /// `cargo test -p fan-lsp 真实librime -- --ignored --test-threads=1` 运行
+    /// （单线程避免多进程并发写同一 user 目录的 leveldb）。
+    #[test]
+    #[ignore = "需要本机安装 librime 并设置 FAN_TEST_RIME_* 环境变量"]
+    fn 真实librime端到端取词() {
+        let lib_path =
+            std::env::var("FAN_TEST_RIME_LIB").expect("启用该测试需设置 FAN_TEST_RIME_LIB");
+        let options = PinyinOptions {
+            rime_lib_path: lib_path,
+            rime_shared_data_dir: std::env::var("FAN_TEST_RIME_SHARED").unwrap_or_default(),
+            rime_user_data_dir: std::env::var("FAN_TEST_RIME_USER").unwrap_or_default(),
+            rime_schema_id: std::env::var("FAN_TEST_RIME_SCHEMA").unwrap_or_default(),
+            ..PinyinOptions::sensible_default()
+        };
+        let engine = RimeDynamicEngine::try_load(&options).expect("真实 librime 应加载成功");
+        // 全拼常见输入：验证 set_input/get_context 候选解析链路。
+        let candidates = engine.suggest("nihao", &options);
+        assert!(!candidates.is_empty(), "nihao 应至少返回一个候选");
+        assert!(candidates.iter().all(|c| c.detail == "Rime"));
+        eprintln!(
+            "nihao 候选：{:?}",
+            candidates.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+        // rank 仍由内置引擎负责，已知词应正常打分。
+        assert!(engine.rank("hanshu", "函数", &options).is_some());
     }
 }
