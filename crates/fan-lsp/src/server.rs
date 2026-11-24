@@ -382,6 +382,15 @@ impl Server {
                 input.double = b;
             }
             options.schemes = input;
+        } else if let Some(mode) = lookup("inputMode", "input_mode").and_then(Value::as_str) {
+            // 便捷字段 inputMode（仅在未提供显式 schemes 时生效，保持向后兼容）：
+            // pinyin=全拼+首字母，double=仅双拼。
+            let is_double = mode.trim().eq_ignore_ascii_case("double");
+            options.schemes = InputSchemes {
+                full: !is_double,
+                initial: !is_double,
+                double: is_double,
+            };
         }
         if let Some(v) = lookup("engine", "engine") {
             if let Some(s) = v.as_str() {
@@ -657,6 +666,46 @@ mod tests {
             out.push(v);
         }
         out
+    }
+
+    #[test]
+    fn input_mode_双拼只开双拼模式() {
+        let server = Server::new();
+        server.configure_pinyin(&json!({
+            "initializationOptions": { "pinyin": { "inputMode": "double" } }
+        }));
+        let opts = server.pinyin.lock().unwrap().clone();
+        assert!(!opts.schemes.full);
+        assert!(!opts.schemes.initial);
+        assert!(opts.schemes.double);
+    }
+
+    #[test]
+    fn input_mode_全拼开全拼与首字母() {
+        let server = Server::new();
+        server.configure_pinyin(&json!({
+            "initializationOptions": { "pinyin": { "inputMode": "pinyin" } }
+        }));
+        let opts = server.pinyin.lock().unwrap().clone();
+        assert!(opts.schemes.full);
+        assert!(opts.schemes.initial);
+        assert!(!opts.schemes.double);
+    }
+
+    #[test]
+    fn 显式schemes优先于input_mode() {
+        let server = Server::new();
+        server.configure_pinyin(&json!({
+            "initializationOptions": {
+                "pinyin": {
+                    "inputMode": "double",
+                    "schemes": { "full": true, "initial": false, "double": false }
+                }
+            }
+        }));
+        let opts = server.pinyin.lock().unwrap().clone();
+        assert!(opts.schemes.full);
+        assert!(!opts.schemes.double);
     }
 
     #[test]
